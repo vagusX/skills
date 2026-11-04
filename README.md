@@ -1,3 +1,4 @@
 # skills
 
 - [ambition](ambition/SKILL.md) — rewrite polite action asks into ambitious outcomes before executing
+- [eli18](eli18/SKILL.md)：按高中生能理解的程度，用 HTML 图解解释主题、原理和具体例子。
