@@ -1,6 +1,8 @@
 # Codex App 会话操作
 
-核对日期：2026-11-09。下面列的是本 skill 当前支持的 Codex App 工具；执行时重新发现工具并读实际 schema。工具可能带 namespace 前缀。它们与公共 App Server 的 `thread/start`、`turn/start` 等方法是两套接口，不能互换名字或假定能力相同。
+此文件保留手工管理 App chat 的接口说明。当前四表后台调度见 [运行说明](runtime.md)；这些 App 工具不能替代后台事件队列，也不用于接管已有后台 thread。
+
+核对日期：2026-11-09。CLI 入口不可用、不能满足目录需求或用户明确选择 App 时使用本文件。下面列的是当前 Codex App 工具；执行时重新发现工具并读实际 schema。工具可能带 namespace 前缀。它们与公共 App Server 的 `thread/start`、`turn/start` 等方法是两套接口，不能互换名字或假定能力相同。
 
 当前操作所需的关键参数如下；实际 schema 变化时以宿主为准。
 
@@ -25,7 +27,7 @@
 
 创建交接要写明目标项目/模块目录、所需 AGENTS.md 和适用 SKILL.md 的真实路径。worker 开始改动前核对目录与这些指令；主 chat 用 `read_thread.thread.cwd` 复核。可以按明确路径读取适用的技能正文和引用文件，但必须注明这是显式读取，不能冒充会话已在目标 cwd 完成自动发现。
 
-目录限制来自当前 App 工具的参数范围，不是 Codex 底层缺少支持。已核对本机 0.167.0 schema：公共 App Server 的 `thread/start`、`thread/resume`、`turn/start` 都有 cwd；Codex CLI 提供 `--cd`。本 skill 目前没有实现这些入口的调度客户端，不能自动切换过去，也不能宣称已验证它们与 App 会话工具的可见性互通。用户要求任意目录且当前工具无法满足时，把这个接口选择明确交回，而不是让 worker 执行 shell cd 后继续假定项目已加载。
+目录限制来自当前 App 工具的参数范围，不是 Codex 底层缺少支持。已核对本机 0.167.0 schema：公共 App Server 的 `thread/start`、`thread/resume`、`turn/start` 都有 cwd。当前后台程序已通过 app-server 管理自有会话，见 [运行说明](runtime.md)；旧版手工 CLI 见 [CLI 参考](codex-cli.md)。App 回退仍需匹配能满足目标目录的已有项目，不用某次 shell cd 代替会话目录设置。
 
 来源：[Skills 发现范围](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)、[App Server 创建线程](https://learn.chatgpt.com/docs/app-server#start-or-resume-a-thread)。隔离 fixture 的只读 `skills/list` 已验证：仓库外无该仓技能，仓库根仅 root，模块目录含自身和祖先技能；未启动模型或新会话。
 
@@ -35,13 +37,21 @@
 
 ## 等待与读取
 
-- `wait_threads` 一次最多 8 个 targets，每项使用真实 `threadId`、已返回的 `hostId` 和上次的 `afterCursor`。目标更多时分组等待，轮换检查每组，避免遗漏后面各组。
-- `timeoutMs: 0` 用于立即快照；持续跟进时使用有界等待，单次不超过 60 秒，避免空轮询并遵守宿主进度更新要求。
+create_thread 是非阻塞创建。默认保存真实 threadId/hostId、原始请求和必要的当前状态后立即返回入口 chat；必要时只取一次 read_thread 或 `wait_threads(timeoutMs:0)` 快照，不等执行或验收。只有 clientThreadId 时保存“准备中”及该标识，如实返回，不能冒充真实 threadId 或无限刷新。
+
+入口返回不发送停止指令。worker 在宿主允许的运行生命周期内继续执行、等待和验收；耗时补验或修正继续原 worker。普通进展不刷屏。当前工具没有证明入口结束后会自动收取或通知，也没有提供持久管理循环；如实说明限制，用户回来后核对原会话，不通过入口持续等待或另建定时任务补齐。
+
+只有用户明确要求“等到完成”时，才使用以下持续等待规则：
+
+- `wait_threads` 一次最多 8 个 targets，每项使用真实 `threadId`、已返回的 `hostId` 和上次的 `afterCursor`。更多目标分组等待。
+- 默认确认启动或状态查询使用 `timeoutMs: 0`。显式同步等待时每次有界等待不超过 60 秒，不把普通“继续/跟进”当成这种请求。
 - 每次保存返回的 cursor。首个会话完成或需要处理时可能返回；检查所有目标以及 per-target errors，不因一个完成就认为全部完成。
 - `read_thread` 用于需要原文、完整问题或最终报告时。按返回 cursor 读取必要的更早 turns；信息截断或缺失时，不能据简短摘要宣布结果已验证。
 - 不向正在执行的 worker 反复发送“进度如何”。先读原生状态；对已结束但缺报告的 worker，只有在现有续管授权内才发送具体的补充报告请求。
 
 `wait_threads` 的 cursor 用来避免重复交付结果；它不是已经验证的跨进程持久事件 offset。恢复管理时仍要重新读取实际会话。工具返回的 idle 或 completed 只能描述对应原生执行状态，业务结果仍需报告和证据。
+
+默认回执示例：“已创建工作 <真实工作 ID>，chat=<真实 threadId>，后台继续执行和验收。”仅准备中时明确给出 clientThreadId。需要人决定时转述 worker 的具体问题并返回；收到回答后向原 thread 发送，不新建工作，也不自行批准原生权限。
 
 ## 继续与停止
 
@@ -55,6 +65,6 @@
 - App 或执行宿主退出后，活动 turn 是否持续执行。
 - 工具断连或创建请求超时后，是否能自动得到可重放的完整事件记录。
 
-未验证时只说明当前查到的事实。不要偷偷换成 `codex exec` 后台进程、低层 App Server 客户端、外部调度器或 DSH。其他 harness 的支持需要另外核实并新增对应参考文件。
+未验证时只说明当前查到的事实。按本文件管理的 App 工作继续沿用 App，不能因观察失败就改用 CLI、低层 App Server 客户端、外部调度器或 DSH 重建工作。CLI 优先规则只用于新工作的入口选择；其他 harness 的支持需要另外核实。
 
 参考：[Codex skills](https://developers.openai.com/codex/skills/)、[公共 App Server](https://learn.chatgpt.com/docs/app-server)。App 工具的具体参数以当前宿主发现结果为准。

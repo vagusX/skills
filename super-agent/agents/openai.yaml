@@ -1,4 +1,0 @@
-interface:
-  display_name: "Super Agent"
-  short_description: "用 Codex 原生会话管理多项工作，保存进度并继续处理跟进请求"
-  default_prompt: "使用 $super-agent 为下面的工作创建并管理独立的 Codex chat，持续收取结果并在原范围内跟进。"
