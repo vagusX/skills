@@ -1,4 +1,6 @@
 interface:
   display_name: "Agent Manager"
   short_description: "用 CLI、SQLite 与 Codex 原生会话管理后台工作，也保留普通聊天"
-  default_prompt: "使用 $agent-manager 派发并管理下面明确指定的工作；确认启动并保存真实标识后立即返回，由后台继续执行和验收。只有我明确要求等到完成时才持续等待。"
+  default_prompt: "在已激活的当前入口 chat 使用 $agent-manager 管理下面明确指定的工作；确认启动并保存真实标识后立即返回。只有我明确要求等到完成时才持续等待。"
+policy:
+  allow_implicit_invocation: false

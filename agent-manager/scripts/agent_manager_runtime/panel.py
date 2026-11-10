@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import webbrowser
 
 from .approvals import pending_questions, queue_answer
+from .activation import background_environment
 from .codex import process_alive, process_start
 from .store import Store, encode
 
@@ -75,7 +76,7 @@ def ensure_panel(store, project, *, open_now=False):
         with (store.directory / "panel.log").open("ab", buffering=0) as log:
             child = subprocess.Popen([sys.executable, str(launcher), "--project", project,
                 "--state-dir", str(store.directory), "panel-run"], stdin=subprocess.DEVNULL,
-                stdout=log, stderr=log, start_new_session=True)
+                stdout=log, stderr=log, start_new_session=True, env=background_environment())
         store.panel_child = child
         for _ in range(100):
             record = panel_record(store)

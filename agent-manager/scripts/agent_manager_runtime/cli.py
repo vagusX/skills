@@ -13,6 +13,7 @@ import sys
 import time
 
 from .codex import Codex, process_alive
+from .activation import CONTROL_COMMANDS, background_environment, check_binding, read_session_context, require_active, require_entry, session_context
 from .approvals import queue_answer, answer_receipt
 from .notifications import acknowledge, bind_entry, inbox, notify
 from .controller import Controller
@@ -27,7 +28,7 @@ def parser():
     p.add_argument("--project", default=os.getcwd(), help="project/module directory; defaults to cwd")
     p.add_argument("--state-dir", help="isolated state directory; normally derived from project")
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("setup", "run", "start", "stop", "status", "panel", "panel-run", "panel-stop", "unbind-entry"):
+    for name in ("setup", "run", "start", "stop", "status", "context", "panel", "panel-run", "panel-stop", "unbind-entry"):
         commands.add_parser(name)
     commands.add_parser("list", help="read one snapshot of this manager's registered Codex workers and pending native questions")
     cmd = commands.add_parser("bind-entry", help="bind the user-owned entry chat without resuming or taking its writer")
@@ -111,6 +112,8 @@ def daemon_record(store):
 
 
 async def entry_command(store, args):
+    if args.command == "bind-entry":
+        check_binding(store, args.thread_id)
     async def request(client, message):
         raise RuntimeError("queue/history client received an unexpected server request")
     async def event(client, message):
@@ -126,6 +129,7 @@ async def entry_command(store, args):
         if thread["id"] != args.thread_id:
             raise ValueError("native thread/read returned a different ID")
         with store.transaction():
+            check_binding(store, args.thread_id)
             result = bind_entry(store, args.thread_id)
             for question in store.all("SELECT * FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NULL"):
                 notify(store, question["id"], question["chat_id"], "approval", parent_id=question["id"], question_id=question["id"])
@@ -136,9 +140,13 @@ async def entry_command(store, args):
 
 def dispatch(args, store):
     command = args.command
+    if command == "context":
+        return session_context(store)
     if command == "setup":
         return {"main": store.setup(args.project), "state_directory": str(store.directory)}
     store.main()
+    if command in CONTROL_COMMANDS:
+        require_entry(store, command)
     if command == "list":
         return list_work(store)
     if command in {"bind-entry", "inbox"}:
@@ -171,7 +179,7 @@ def dispatch(args, store):
         with (store.directory / "daemon.log").open("ab", buffering=0) as log:
             process = subprocess.Popen([sys.executable, str(launcher), "--project", args.project,
                 "--state-dir", str(store.directory), "run"], stdin=subprocess.DEVNULL,
-                stdout=log, stderr=log, start_new_session=True)
+                stdout=log, stderr=log, start_new_session=True, env=background_environment())
         for _ in range(225):
             if process.poll() is not None:
                 raise RuntimeError("background startup failed; read daemon.log")
@@ -298,13 +306,21 @@ def dispatch(args, store):
 def main(argv=None):
     args = parser().parse_args(argv)
     args.project = str(Path(args.project).expanduser().resolve(strict=True))
-    store = Store(args.state_dir or data_directory(args.project))
+    directory = Path(args.state_dir or data_directory(args.project))
+    store = None
     try:
-        result = dispatch(args, store)
+        if args.command == "context":
+            result = read_session_context(directory)
+        else:
+            if args.command in CONTROL_COMMANDS:
+                require_active(read_session_context(directory), args.command)
+            store = Store(directory)
+            result = dispatch(args, store)
         print(encode(result))
         return 0
     except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as error:
         print(encode({"error": str(error)}), file=sys.stderr)
         return 1
     finally:
-        store.close()
+        if store:
+            store.close()

@@ -59,6 +59,9 @@ class NativeQueue:
 
 class NotificationTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ, {'CODEX_THREAD_ID': ENTRY})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / 'project'
         self.project.mkdir()

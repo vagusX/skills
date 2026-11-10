@@ -2,6 +2,18 @@
 
 命令入口是本 skill 的 `scripts/agent_manager.py`。下例的 `$cli` 与 `$project` 表示已经核对的绝对路径，不是新增环境配置；正文通过 stdin 传入。需要 Python 3.9+、PATH 中已登录的 Codex CLI；GitHub 来源另需已登录的 gh。当前使用 Unix 进程锁，支持 macOS/Linux；Windows 未实现。
 
+## 设置入口与当前会话
+
+用户手动调用 `$setup-agent-manager` 后，由该 skill 初始化项目、绑定当前 chat 并启动后台。agent-manager 只负责激活后的使用；setup-issue-triage 也须先确认已激活，不自动代做入口设置。仅维护这些 skill、日常改代码、同 cwd 已有数据库或复制一段通知，都不进入管理模式。
+
+```sh
+python3 "$cli" --project "$project" context
+```
+
+context 无额外参数，只读返回 current_thread_id、entry_thread_id、role 和 active；项目尚未初始化时不创建状态目录。只有实际 CODEX_THREAD_ID 与当前入口绑定相同且 role=entry 时 active=true。role=main/worker 是后台管理角色，不能当作入口；other/unbound 表示当前 chat 未激活，terminal 表示没有宿主当前 ID，不据此声称某个 chat 已激活。chat、fork、subagent 和另一个同目录的对话都独立核对身份。
+
+设置 skill 使用以下流程；普通任务不自动执行 setup 或 bind-entry：
+
 ```sh
 python3 "$cli" --project "$project" setup
 # entry_thread_id 来自当前入口 chat，不能使用后台主 threadId：
@@ -13,7 +25,15 @@ python3 "$cli" --project "$project" wait-start "$job_id"
 # 保存回执后返回入口 chat。后台 run 保持运行。
 ```
 
-`setup` 只初始化项目绑定。`start` 以独立进程启动同一个 CLI 的 `run` 和本地面板，日志写入数据目录；重复 start 复用已确认的后台及面板进程。`run` 也可在终端前台执行。`stop` 请求后台与面板退出并回查；不把“已请求”冒充已停止。本版本不安装开机启动服务。
+`setup` 只初始化项目，不激活会话或派工。`bind-entry` 是设置流程中的显式激活步骤；宿主提供当前 ID 时，目标必须相同，不允许照抄其他 ID 或覆盖不同的现有入口。原后台 main/worker 也不能绑定为入口。同入口重复设置复用记录。
+
+`start` 以独立进程启动同一个 CLI 的 run 和本地面板，日志写入数据目录；重复 start 复用已确认的后台及面板进程。run 也可在终端前台执行。stop 请求后台与面板退出并回查；不把“已请求”冒充已停止。本版本不安装开机启动服务。
+
+来自 Codex chat 的派工、控制、来源写入、答案和 ack 在读取正文、排队或启动子进程前核对激活入口。不匹配时拒绝，不自动绑定、重建或重发。显式的 context/list/status/read 等只读查询不激活会话。人工终端和后台内部操作保留原有能力；启动服务时只在子进程环境移除继承的 CODEX_THREAD_ID，不改父进程环境。该核对是工作流边界，不是 OS 隔离；agent 不能通过清空环境变量规避拒绝。
+
+用户明确退出当前 chat 管理模式时，用 unbind-entry 并回读 context，确认 active=false；原后台和已授权工作继续存在，旧通知也不代表重新激活。停止某项工作或整个后台仍需分别明确要求。已有绑定不因安装或升级被删除，也不迁走 threadId。
+
+三个 skill 的 Codex 元数据均设置 `policy.allow_implicit_invocation: false`，只允许显式调用；不能省略这项，否则默认恢复自动匹配。设置成功后入口读取 agent-manager 正文用于后续管理，仍按人的请求区分普通聊天与独立工作。[官方调用策略](https://learn.chatgpt.com/docs/build-skills#optional-metadata)
 
 普通聊天使用 `chat`；它仍在同一个受管理的主 Codex thread 中保留上下文，但不能调用派工或外发工具。`submit` 用于人明确要求管理的独立工作；`followup <工作 ID>` 继续原 worker。不要仅为读进展调用 followup。
 
@@ -118,7 +138,7 @@ macOS 默认状态目录为 `~/Library/Application Support/agent-manager/<项目
 
 ## 入口通知与回执
 
-`bind-entry [threadId]` 只读核对原生 thread 并保存入口映射，不 resume、不切换当前会话的执行进程。ID 可省略，默认使用 CODEX_THREAD_ID；没有该环境值时必须提供真实 ID。`unbind-entry` 停止产生后续入口通知，已经存在的通知保持原目标。重新绑定只影响新通知，不能让旧审批换人或换 worker。
+`bind-entry [threadId]` 核对原生 thread 后保存当前入口的激活绑定，不 resume、不切换会话执行进程。ID 可省略，默认使用 CODEX_THREAD_ID；有宿主 ID 时不能用参数覆盖成另一个 chat，也不自动替换不同的已有入口。没有该环境值的人工终端须明确提供真实 ID。`unbind-entry` 停止产生后续入口通知，已经存在的通知保持原目标；旧通知不重新激活入口，不能让旧审批换人或换 worker。
 
 CLI 调用 `codex queue` 使用的 `thread/queue/add`、`thread/queue/list` 原生接口，以本地 notification job ID 作为 clientUserMessageId。直接调用接口是为了保存关联 ID；命令行 queue 每次生成新 ID，不能用于结果不明时的盲重试。入口从不加入后台 runs，后台也不调用其 turn/start、resume 或 steer。
 
@@ -127,8 +147,10 @@ App 正在运行且入口 thread 已加载时，原进程自动检查队列，�
 收到通知后的默认操作：
 
 ```sh
+python3 "$cli" --project "$project" context
+# 仅在宿主 ID 等于通知目标且 active=true 时继续；粘贴/讨论通知不执行这些命令。
 python3 "$cli" --project "$project" inbox "$event_id"
-python3 "$cli" --project "$project" ack "$event_id" --thread "$entry_thread_id"
+python3 "$cli" --project "$project" ack "$event_id"
 # 用入口实际可用的提问工具询问一个具体决定，然后结束本轮。
 # 人回答后，将原生请求要求的 JSON 通过 stdin 交回原 question_id：
 python3 "$cli" --project "$project" answer "$question_id" < "$response_file"
@@ -168,7 +190,7 @@ python3 "$cli" --project "$project" source-add --command-json '["python3","/abso
 | 参数 | 能否省略 |
 | --- | --- |
 | bind-entry 的 threadId | 可省略，读取 CODEX_THREAD_ID；没有宿主值时必须提供真实 ID |
-| ack 的 --thread | 可省略，读取 CODEX_THREAD_ID；通知给出的命令已带真实入口 ID |
+| ack 的 --thread | 可省略，读取实际 CODEX_THREAD_ID；有宿主 ID 时不能冒认另一个入口 |
 | --project | 可以，默认当前 cwd；需要模块 skills 时应明确对应目录 |
 | --state-dir | 可以，默认按项目推导；仅独立测试或明确隔离实例时指定 |
 | --github / --command-json / --push | 添加来源时必须选一个，分别表示已有的三种接入方式 |
