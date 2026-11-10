@@ -13,6 +13,9 @@ from .codex import Codex, process_alive, process_start
 from .store import Store, decode, encode, identifier
 from .sources import fetch_source, commit_poll, send_outbox
 from .tools import MAIN_TOOLS, WORKER_TOOLS
+from .approvals import answer_receipt, live_request, validate_response
+from .notifications import deliver, notify
+from .listing import list_work
 
 
 REFERENCES = Path(__file__).resolve().parents[2] / "references"
@@ -32,6 +35,7 @@ class Controller:
         self.lock = None
         self.failed = None
         self.last_recovery = 0
+        self.last_notifications = 0
 
     def log(self, event, **values):
         print(encode({"at": time.time(), "event": event, **values}), flush=True)
@@ -134,6 +138,9 @@ class Controller:
             raise
         except Exception as error:
             self.store.db.execute("UPDATE runs SET state='unknown',error=? WHERE id=? AND state!='exited'", (str(error), run["id"]))
+            with self.store.transaction():
+                notify(self.store, "run-unknown:" + run["id"], chat["id"], "failure",
+                       parent_id=job["id"], error=str(error))
             self.log("run_unknown", run_id=run["id"], error=str(error))
 
     def active_run(self, thread_id, turn_id=None):
@@ -153,12 +160,23 @@ class Controller:
         if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval",
                       "item/permissions/requestApproval", "item/tool/requestUserInput", "mcpServer/elicitation/request"}:
             run = self.active_run(params["threadId"], params.get("turnId"))
-            key = f"question:{client.process.pid}:{message['id']}"
+            key = f"question:{client.process.pid}:{client.started}:{message['id']}"
+            context = None
+            if method == "item/fileChange/requestApproval":
+                try:
+                    recent = await client.call("thread/turns/list", {"threadId": params["threadId"],
+                        "limit": 1, "itemsView": "full", "sortDirection": "desc"}, timeout=5)
+                    context = next((item for turn in recent.get("data", []) for item in turn.get("items", [])
+                                    if item.get("id") == params.get("itemId") and item.get("type") == "fileChange"), None)
+                except (RuntimeError, asyncio.TimeoutError, OSError) as error:
+                    self.log("file_change_context_unavailable", chat_id=run["chat_id"], error_type=type(error).__name__)
             with self.store.transaction():
-                self.store.enqueue("question", run["chat_id"],
+                question, _ = self.store.enqueue("question", run["chat_id"],
                     {"method": method, "params": params, "request_id": message["id"],
-                     "server_pid": client.process.pid, "server_start": client.started},
+                     "server_pid": client.process.pid, "server_start": client.started, "context": context},
                     request_key=key, parent_id=run["job_id"])
+                notify(self.store, question["id"], run["chat_id"], "approval",
+                       parent_id=question["id"], question_id=question["id"])
             self.log("needs_input", chat_id=run["chat_id"], method=method)
             return
         await client.send({"id": message["id"], "error": {"code": -32601, "message": "Unsupported server request; no automatic approval"}})
@@ -173,7 +191,12 @@ class Controller:
         allowed = MAIN_TOOLS if chat["role"] == "main" else WORKER_TOOLS
         if name not in {tool["name"] for tool in allowed}:
             raise ValueError("tool is not allowed for this actual thread role")
+        if name == "sa_list_work":
+            return list_work(self.store)
         if name == "sa_inspect_work":
+            # Existing native threads retain their original dynamic tool schemas.
+            if args["work_id"] == self.store.main()["id"]:
+                return list_work(self.store)
             return await self.inspect(args)
         if job["kind"] == "chat":
             raise ValueError("ordinary conversation does not authorize background work or external writes")
@@ -234,7 +257,8 @@ class Controller:
                 if state != "progress" or args.get("question"):
                     self.store.enqueue("wake", self.store.main()["id"],
                         {"text": "A worker reported. Use sa_inspect_work to read its native report and verify artifacts before responding.",
-                         "work_id": chat["id"], "state": state, "reason": args.get("reason"), "report_ref": ref},
+                         "work_id": chat["id"], "state": state, "reason": args.get("reason"),
+                         "question": args.get("question"), "report_ref": ref},
                         request_key="wake:" + request_key, parent_id=job["id"])
                 result = {"recorded": True, "state": state}
             elif name in {"sa_followup", "sa_attach_event"}:
@@ -284,6 +308,11 @@ class Controller:
         chat = self.worker(args["work_id"])
         result = {"work_id": chat["id"], "thread_id": chat["thread_id"], "cwd": chat["cwd"],
                   "hold": decode(chat["hold"]), "report_state": chat["report_state"], "turns": [], "artifacts": {}}
+        result["native_questions"] = []
+        for question in self.store.all("SELECT * FROM jobs WHERE kind='question' AND chat_id=? ORDER BY created_at DESC LIMIT 20", (chat["id"],)):
+            response = decode(question["result_ref"], {})
+            result["native_questions"].append({**answer_receipt(self.store, question["id"]),
+                "decision": response.get("decision"), "response_recorded": question["result_ref"] is not None})
         if chat["thread_id"]:
             result["turns"] = (await (await self.client("worker")).history(chat["thread_id"]))[-3:]
         for name in args.get("paths", []):
@@ -319,9 +348,15 @@ class Controller:
         elif method == "serverRequest/resolved":
             for job in self.store.all("SELECT * FROM jobs WHERE kind='question' AND status!='done'"):
                 payload = decode(job["payload"], {})
-                if payload.get("server_pid") == client.process.pid and payload.get("request_id") == params.get("requestId"):
+                if (payload.get("server_pid") == client.process.pid and payload.get("server_start") == client.started
+                        and payload.get("request_id") == params.get("requestId")
+                        and (not params.get("threadId") or payload.get("params", {}).get("threadId") == params["threadId"])):
                     ref = {k: payload.get("params", {}).get(k) for k in ("threadId", "turnId", "itemId")}
-                    self.store.db.execute("UPDATE jobs SET status='done',payload=NULL,native_ref=?,updated_at=? WHERE id=?", (encode(ref), time.time(), job["id"]))
+                    ref.update(resolved_at=time.time(), request_id=payload["request_id"],
+                               server_pid=client.process.pid, server_start=client.started, method=payload["method"],
+                               answer_sent=job["status"] in {"inflight", "unknown"} and job["result_ref"] is not None)
+                    self.store.db.execute("UPDATE jobs SET status='done',payload=NULL,native_ref=?,updated_at=?,error=? WHERE id=?",
+                        (encode(ref), time.time(), None if ref["answer_sent"] else "native request closed without a sent answer", job["id"]))
         elif method == "agent-manager/disconnected":
             self.failed = params["error"]
             self.stop_event.set()
@@ -331,6 +366,8 @@ class Controller:
 
     async def completed(self, run, turn, notify_missing=True):
         outcome = turn.get("status", "unknown")
+        job = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
+        payload = decode(job["payload"], {})
         with self.store.transaction():
             actual = self.store.one("SELECT * FROM runs WHERE id=?", (run["id"],))
             if not actual or actual["state"] == "exited":
@@ -350,6 +387,19 @@ class Controller:
                         {"text": "Worker turn ended without a valid report. Inspect native history; do not infer ready or repeatedly restart it.",
                          "work_id": chat["id"], "native_status": outcome},
                         request_key="missing-report:" + run["id"], parent_id=run["job_id"])
+            if chat["role"] == "main" and (job["kind"] == "wake" or
+                    (job["kind"] == "recover" and payload.get("original_kind") == "wake")):
+                corrective = self.store.one("SELECT id FROM jobs WHERE parent_id=? AND kind IN ('task','followup','recover')",
+                                            (job["id"],))
+                if not corrective:
+                    kind = "result"
+                    if outcome != "completed" or payload.get("state") in {"failed", "dropped"}:
+                        kind = "failure"
+                    elif payload.get("question"):
+                        kind = "decision"
+                    notify(self.store, "main-result:" + run["id"], payload.get("work_id") or chat["id"],
+                           kind, parent_id=job["id"], ref={"thread_id": chat["thread_id"], "turn_id": turn["id"]},
+                           error=error, report_ref=payload.get("report_ref"))
         self.log("turn_completed", run_id=run["id"], chat_id=chat["id"], turn_id=turn["id"], outcome=outcome)
 
     async def recover(self, startup=False):
@@ -420,6 +470,7 @@ class Controller:
                 self.store.db.execute("UPDATE runs SET state='unknown',error='cannot reconcile original input' WHERE id=?", (run["id"],))
                 continue
             recovery_payload = {**original_payload, "original_job_id": original_payload.get("original_job_id", original["id"]),
+                "original_kind": original_payload.get("original_kind", original["kind"]),
                 "text": "Recovery after an interrupted native run. First inspect actual files, Git and external state; do not repeat completed side effects. Continue only the original authorized request below.\n\n" + original_payload.get("text", "")}
             with self.store.transaction():
                 self.store.enqueue("recover", chat["id"], recovery_payload,
@@ -469,17 +520,48 @@ class Controller:
                                   (str(error), time.time(), job["id"]))
             self.log("outbox_unknown", job_id=job["id"], error=str(error))
 
+    def answer_unknown(self, job, error):
+        with self.store.transaction():
+            self.store.db.execute("UPDATE jobs SET status='unknown',error=?,updated_at=? WHERE id=?",
+                                  (str(error), time.time(), job["id"]))
+            notify(self.store, "answer-unknown:" + job["id"], job["chat_id"], "failure", parent_id=job["id"],
+                   error=f"Native answer delivery is unconfirmed for question {job['id']}: {error}. Read answer-status; do not resend the answer.")
+
     async def answer_questions(self):
-        for job in self.store.all("SELECT * FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NOT NULL"):
+        for selected in self.store.all("SELECT id FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NOT NULL"):
+            job = self.store.one("SELECT * FROM jobs WHERE id=? AND status='pending' AND result_ref IS NOT NULL", (selected["id"],))
+            if not job:
+                continue
             request = decode(job["payload"])
             response = decode(job["result_ref"])
             chat = self.store.one("SELECT * FROM chats WHERE id=?", (job["chat_id"],))
             client = self.clients.get(chat["role"])
             if not client or request["server_pid"] != client.process.pid or request["server_start"] != client.started:
-                self.store.db.execute("UPDATE jobs SET status='unknown',error='native request connection changed' WHERE id=?", (job["id"],))
+                self.answer_unknown(job, "native request connection changed")
                 continue
-            self.store.db.execute("UPDATE jobs SET status='inflight' WHERE id=?", (job["id"],))
-            await client.respond(request["request_id"], response)
+            if not live_request(self.store, job):
+                self.store.db.execute("UPDATE jobs SET status='done',error='native request is no longer live',updated_at=? WHERE id=?",
+                                      (time.time(), job["id"]))
+                continue
+            validate_response(request, response)
+            with self.store.transaction():
+                self.store.db.execute("UPDATE jobs SET status='inflight' WHERE id=?", (job["id"],))
+                if (request["method"] in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}
+                        and response.get("decision") == "cancel"):
+                    self.store.db.execute("UPDATE chats SET hold=COALESCE(hold,?) WHERE id=?", (
+                        encode({"request": "Human cancelled the native command/file turn; wait for explicit continue",
+                                "at": time.time(), "question_id": job["id"], "requires_human_continue": True,
+                                "interrupt_requested": True}), job["chat_id"]))
+            try:
+                await client.respond(request["request_id"], response)
+            except (RuntimeError, OSError) as error:
+                self.answer_unknown(job, error)
+
+    async def notifications(self):
+        try:
+            await deliver(self.store, await self.client("main"))
+        except (RuntimeError, OSError) as error:
+            self.log("notification_error", error=str(error))
 
     async def honor_holds(self):
         for row in self.store.all("""SELECT c.*,r.turn_id,r.id AS run_id FROM chats c JOIN runs r ON r.chat_id=c.id
@@ -527,6 +609,9 @@ class Controller:
                     if outbox["status"] == "pending":
                         self.store.db.execute("UPDATE jobs SET status='inflight',updated_at=? WHERE id=?", (time.time(), outbox["id"]))
                     self.tasks[task_key] = asyncio.create_task(self.outbox_task(outbox))
+                if time.monotonic() - self.last_notifications > 5 and "notifications" not in self.tasks:
+                    self.tasks["notifications"] = asyncio.create_task(self.notifications())
+                    self.last_notifications = time.monotonic()
                 await self.answer_questions()
                 await self.honor_holds()
                 for chat in self.store.all("SELECT * FROM chats WHERE closed=0 ORDER BY created_at"):

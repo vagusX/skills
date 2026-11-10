@@ -13,7 +13,11 @@ import sys
 import time
 
 from .codex import Codex, process_alive
+from .approvals import queue_answer, answer_receipt
+from .notifications import acknowledge, bind_entry, inbox, notify
 from .controller import Controller
+from .listing import list_work
+from .panel import ensure_panel, panel_record, panel_url, public_record, serve_panel, stop_panel
 from .sources import commit_poll, fetch_source
 from .store import Store, data_directory, decode, encode, identifier
 
@@ -23,8 +27,18 @@ def parser():
     p.add_argument("--project", default=os.getcwd(), help="project/module directory; defaults to cwd")
     p.add_argument("--state-dir", help="isolated state directory; normally derived from project")
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("setup", "run", "start", "stop", "status"):
+    for name in ("setup", "run", "start", "stop", "status", "panel", "panel-run", "panel-stop", "unbind-entry"):
         commands.add_parser(name)
+    commands.add_parser("list", help="read one snapshot of this manager's registered Codex workers and pending native questions")
+    cmd = commands.add_parser("bind-entry", help="bind the user-owned entry chat without resuming or taking its writer")
+    cmd.add_argument("thread_id", nargs="?", default=os.environ.get("CODEX_THREAD_ID"))
+    cmd = commands.add_parser("inbox", help="read entry notifications and their actual native context")
+    cmd.add_argument("event_id", nargs="?")
+    cmd = commands.add_parser("ack", help="acknowledge that the bound entry chat has read one notification")
+    cmd.add_argument("event_id")
+    cmd.add_argument("--thread", help="entry thread ID; defaults to CODEX_THREAD_ID")
+    cmd = commands.add_parser("answer-status", help="read the original native request's delivery receipt")
+    cmd.add_argument("question_id")
     for name in ("submit", "chat", "followup"):
         cmd = commands.add_parser(name)
         if name == "followup":
@@ -43,7 +57,7 @@ def parser():
     cmd.add_argument("reason", nargs="?", default="Human requested a pause; wait for explicit continue")
     cmd = commands.add_parser("continue")
     cmd.add_argument("work_id")
-    cmd.add_argument("text", nargs="?", default="Continue the original authorized work after checking actual state.")
+    cmd.add_argument("text", nargs="?", help="omit to read stdin; empty input uses the original authorized request")
     cmd = commands.add_parser("answer")
     cmd.add_argument("question_id")
     cmd.add_argument("response", nargs="?", help="native response JSON; omit to read stdin")
@@ -96,17 +110,63 @@ def daemon_record(store):
         return None
 
 
+async def entry_command(store, args):
+    async def request(client, message):
+        raise RuntimeError("queue/history client received an unexpected server request")
+    async def event(client, message):
+        pass
+    client = Codex("entry-history", store.directory, store.main()["cwd"], request, event)
+    try:
+        await client.start()
+        if args.command == "inbox":
+            return await inbox(store, client, args.event_id)
+        if not args.thread_id:
+            raise ValueError("bind-entry requires a real thread ID or CODEX_THREAD_ID")
+        thread = (await client.call("thread/read", {"threadId": args.thread_id}))["thread"]
+        if thread["id"] != args.thread_id:
+            raise ValueError("native thread/read returned a different ID")
+        with store.transaction():
+            result = bind_entry(store, args.thread_id)
+            for question in store.all("SELECT * FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NULL"):
+                notify(store, question["id"], question["chat_id"], "approval", parent_id=question["id"], question_id=question["id"])
+        return result
+    finally:
+        await client.close()
+
+
 def dispatch(args, store):
     command = args.command
     if command == "setup":
         return {"main": store.setup(args.project), "state_directory": str(store.directory)}
     store.main()
+    if command == "list":
+        return list_work(store)
+    if command in {"bind-entry", "inbox"}:
+        return asyncio.run(entry_command(store, args))
+    if command == "unbind-entry":
+        store.db.execute("UPDATE chats SET entry_thread_id=NULL WHERE role='main'")
+        return {"entry_thread_id": None, "already_queued_messages_unchanged": True}
+    if command == "ack":
+        return acknowledge(store, args.event_id, args.thread)
+    if command == "answer-status":
+        return answer_receipt(store, args.question_id)
+    if command == "panel-run":
+        serve_panel(store)
+        return {"panel_stopped": True}
+    if command == "panel":
+        record = ensure_panel(store, args.project, open_now=True)
+        return {**public_record(record), "url": panel_url(record),
+                **({"open_error": record["open_error"]} if record.get("open_error") else {})}
+    if command == "panel-stop":
+        return stop_panel(store)
     if command == "run":
+        ensure_panel(store, args.project)
         asyncio.run(Controller(store).run())
         return {"stopped": True}
     if command == "start":
         if record := daemon_record(store):
-            return {"already_running": True, **record}
+            panel = ensure_panel(store, args.project)
+            return {"already_running": True, **record, "panel": public_record(panel)}
         launcher = Path(__file__).resolve().parents[1] / "agent_manager.py"
         with (store.directory / "daemon.log").open("ab", buffering=0) as log:
             process = subprocess.Popen([sys.executable, str(launcher), "--project", args.project,
@@ -118,21 +178,25 @@ def dispatch(args, store):
             record = daemon_record(store)
             main = store.main()
             if record and main["thread_id"]:
-                return {"running": True, **record, "main_thread_id": main["thread_id"]}
+                panel = ensure_panel(store, args.project)
+                return {"running": True, **record, "main_thread_id": main["thread_id"], "panel": public_record(panel)}
             time.sleep(.2)
         raise RuntimeError("background startup is not yet confirmed; inspect status and daemon.log before retrying")
     if command == "stop":
         record = daemon_record(store)
         if not record:
-            return {"running": False}
+            return {"running": False, "panel": stop_panel(store)}
         os.kill(record["pid"], signal.SIGTERM)
         for _ in range(150):
             if not process_alive(record["pid"], record["started"]):
-                return {"stopped": True, "pid": record["pid"]}
+                return {"stopped": True, "pid": record["pid"], "panel": stop_panel(store)}
             time.sleep(.2)
         return {"stop_requested": True, "confirmed_stopped": False, "pid": record["pid"]}
     if command == "status":
         return {**store.status(), "daemon": daemon_record(store),
+                "entry_thread_id": store.main()["entry_thread_id"],
+                "notifications": store.all("SELECT * FROM jobs WHERE kind='notification' ORDER BY created_at DESC LIMIT 80"),
+                "panel": public_record(panel_record(store)),
                 "questions": store.all("SELECT * FROM jobs WHERE kind='question' AND status!='done'")}
     if command in {"submit", "chat", "followup"}:
         return store.submit(stdin_or(args.text), kind="task" if command == "submit" else command,
@@ -166,22 +230,18 @@ def dispatch(args, store):
             store.db.execute("UPDATE chats SET hold=? WHERE id=?", (encode(hold), args.work_id))
         return {"hold_saved": True, "work_id": args.work_id, "stopped": False}
     if command == "continue":
+        text = args.text if args.text is not None else (sys.stdin.read() if not sys.stdin.isatty() else "")
+        if not text.strip():
+            text = "Continue the original authorized work after checking actual state."
         with store.transaction():
             chat = store.one("SELECT * FROM chats WHERE id=?", (args.work_id,))
             if not chat:
                 raise ValueError("unknown chat")
             store.db.execute("UPDATE chats SET hold=NULL WHERE id=?", (chat["id"],))
-            return store.enqueue("followup", chat["id"], {"text": args.text})[0]
+            return store.enqueue("followup", chat["id"], {"text": text})[0]
     if command == "answer":
         response = json.loads(stdin_or(args.response))
-        if not isinstance(response, dict):
-            raise ValueError("native response must be an object")
-        with store.transaction():
-            job = store.one("SELECT * FROM jobs WHERE id=? AND kind='question' AND status='pending'", (args.question_id,))
-            if not job:
-                raise ValueError("question is not pending on a live native connection")
-            store.db.execute("UPDATE jobs SET result_ref=? WHERE id=?", (encode(response), job["id"]))
-        return {"answer_queued": True, "question_id": job["id"]}
+        return queue_answer(store, args.question_id, response)
     if command == "source-add":
         config = {"cwd": store.main()["cwd"], "allow_reply": args.allow_reply}
         if args.github:

@@ -75,6 +75,9 @@ class Store:
         CREATE UNIQUE INDEX IF NOT EXISTS one_open_run ON runs(chat_id)
             WHERE state IN ('prepared','running','unknown');
         """)
+        with self.transaction():
+            if "entry_thread_id" not in {r["name"] for r in self.all("PRAGMA table_info(chats)")}:
+                self.db.execute("ALTER TABLE chats ADD COLUMN entry_thread_id TEXT")
         os.chmod(self.directory / "state.sqlite3", 0o600)
 
     def close(self):

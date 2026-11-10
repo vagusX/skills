@@ -9,7 +9,7 @@ description: 为 agent-manager 配置 GitHub issue、第三方轮询脚本或已
 
 确定目标项目或模块 cwd、GitHub 仓库/issue 或第三方收取命令，以及人明确允许的操作。已有上下文能确定时不重复询问；来源和范围不能从任意 issue 正文自行扩展。明确请求设置监听的授权覆盖本次初始化和正常收取；外部回复只有明确授权才启用。
 
-调用 CLI setup、source-add、start，随后 status 回读真实主 threadId、项目目录、source ID 和后台进程。需要验证来源时调用 poll，再检查实际新增 job；不能把“保存了配置”说成已验证触发。普通 GitHub 设置复用现有 gh 登录，命令来源使用明确的 argv 数组，已有 trigger 经 push 来源和 ingest 接入。
+调用 CLI setup、bind-entry <当前入口 chat 的真实 threadId>、source-add、start，随后 status 回读真实主 threadId、项目目录、source ID、后台进程和本地审批面板。原生问题通过队列通知已绑定入口，由入口提问并用 answer 转交；也可明确用 panel 打开面板处理。已有 worker 不因绑定入口或接入面板而重启。需要验证来源时调用 poll，再检查实际新增 job；不能把“保存了配置”说成已验证触发。普通 GitHub 设置复用现有 gh 登录，命令来源使用明确的 argv 数组，已有 trigger 经 push 来源和 ingest 接入。
 
 默认确认设置和来源入库后即返回入口 chat，后台继续派发和执行；不要等触发的 worker 完成或验收。只有用户明确要求“等到完成”才持续等待。启动或收取结果不明时保留真实 ID 与当前状态，不为确认而重复初始化或刷新到终态。
 

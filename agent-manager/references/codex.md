@@ -68,3 +68,5 @@ create_thread 是非阻塞创建。默认保存真实 threadId/hostId、原始�
 未验证时只说明当前查到的事实。按本文件管理的 App 工作继续沿用 App，不能因观察失败就改用 CLI、低层 App Server 客户端、外部调度器或 DSH 重建工作。CLI 优先规则只用于新工作的入口选择；其他 harness 的支持需要另外核实。
 
 参考：[Codex skills](https://developers.openai.com/codex/skills/)、[公共 App Server](https://learn.chatgpt.com/docs/app-server)。App 工具的具体参数以当前宿主发现结果为准。
+
+上述自动收取边界针对本文件的手工 App 工具路径。当前四表 CLI 的原生队列通知见 [入口通知与回执](runtime.md#入口通知与回执)，不由本文件的等待工具提供。

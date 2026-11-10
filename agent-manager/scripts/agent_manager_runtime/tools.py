@@ -10,9 +10,11 @@ def tool(name, description, properties, required):
 STRING = {"type": "string"}
 WORK = {"work_id": STRING}
 MAIN_TOOLS = [
+    tool("sa_list_work", "Read one snapshot of this manager's registered Codex workers, execution observations and pending native questions. No waiting or side effects.",
+         {}, []),
     tool("sa_create_work", "Create one worker for the current explicitly authorized request. Original text is supplied by the scheduler; do not rewrite it.",
          {"title": STRING, "cwd": STRING}, ["title"]),
-    tool("sa_inspect_work", "Read actual work state, native history and optional artifact paths relative to the work cwd. Use before delivering a result.",
+    tool("sa_inspect_work", "Read actual work state, native history and optional artifact paths relative to the work cwd. Use before delivering a result. Passing this manager's chat ID as work_id lists its registered workers instead.",
          {**WORK, "paths": {"type": "array", "items": STRING}}, ["work_id"]),
     tool("sa_followup", "Continue an existing worker within the original authorized scope. Never use for ordinary conversation or just asking for status.",
          {**WORK, "text": STRING}, ["work_id", "text"]),
