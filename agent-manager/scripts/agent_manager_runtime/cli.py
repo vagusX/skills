@@ -19,6 +19,7 @@ from .notifications import acknowledge, bind_entry, inbox, notify
 from .controller import Controller
 from .listing import list_work
 from .panel import ensure_panel, panel_record, panel_url, public_record, serve_panel, stop_panel
+from .patrol import bind_heartbeat, heartbeat_plan, heartbeat_receipt, patrol
 from .sources import commit_poll, fetch_source
 from .store import Store, data_directory, decode, encode, identifier
 
@@ -31,6 +32,10 @@ def parser():
     for name in ("setup", "run", "start", "stop", "status", "context", "panel", "panel-run", "panel-stop", "unbind-entry"):
         commands.add_parser(name)
     commands.add_parser("list", help="read one snapshot of this manager's registered Codex workers and pending native questions")
+    commands.add_parser("patrol", help="check an active entry once and queue deduplicated progress reviews; never wait or approve")
+    commands.add_parser("heartbeat-plan", help="describe the App heartbeat for this active entry and its saved receipt")
+    cmd = commands.add_parser("heartbeat-bind", help="save a verified App automation ID for this active entry")
+    cmd.add_argument("automation_id")
     cmd = commands.add_parser("bind-entry", help="bind the user-owned entry chat without resuming or taking its writer")
     cmd.add_argument("thread_id", nargs="?", default=os.environ.get("CODEX_THREAD_ID"))
     cmd = commands.add_parser("inbox", help="read entry notifications and their actual native context")
@@ -147,13 +152,19 @@ def dispatch(args, store):
     store.main()
     if command in CONTROL_COMMANDS:
         require_entry(store, command)
+    if command == "patrol":
+        return patrol(store)
+    if command in {"heartbeat-plan", "heartbeat-bind"}:
+        return heartbeat_plan(store) if command == "heartbeat-plan" else bind_heartbeat(store, args.automation_id)
     if command == "list":
         return list_work(store)
     if command in {"bind-entry", "inbox"}:
         return asyncio.run(entry_command(store, args))
     if command == "unbind-entry":
+        heartbeat = heartbeat_receipt(store)
         store.db.execute("UPDATE chats SET entry_thread_id=NULL WHERE role='main'")
-        return {"entry_thread_id": None, "already_queued_messages_unchanged": True}
+        return {"entry_thread_id": None, "already_queued_messages_unchanged": True,
+                "heartbeat_to_pause": heartbeat}
     if command == "ack":
         return acknowledge(store, args.event_id, args.thread)
     if command == "answer-status":
@@ -203,6 +214,7 @@ def dispatch(args, store):
     if command == "status":
         return {**store.status(), "daemon": daemon_record(store),
                 "entry_thread_id": store.main()["entry_thread_id"],
+                "heartbeat": heartbeat_receipt(store),
                 "notifications": store.all("SELECT * FROM jobs WHERE kind='notification' ORDER BY created_at DESC LIMIT 80"),
                 "panel": public_record(panel_record(store)),
                 "questions": store.all("SELECT * FROM jobs WHERE kind='question' AND status!='done'")}
@@ -311,9 +323,13 @@ def main(argv=None):
     try:
         if args.command == "context":
             result = read_session_context(directory)
+        elif args.command == "patrol" and not read_session_context(directory)["active"]:
+            result = {"active": False, "skipped": True, "reason": "current chat is not the active entry"}
         else:
             if args.command in CONTROL_COMMANDS:
                 require_active(read_session_context(directory), args.command)
+            if args.command in {"heartbeat-plan", "heartbeat-bind"} and not read_session_context(directory)["active"]:
+                raise ValueError("periodic patrol requires this manager's actual active entry chat")
             store = Store(directory)
             result = dispatch(args, store)
         print(encode(result))

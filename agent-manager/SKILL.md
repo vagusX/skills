@@ -29,7 +29,7 @@ description: "仅在当前 chat 已通过 setup-agent-manager 激活后，管理
 
 ## 提交与聊天
 
-- 人明确要求创建独立工作时，用 `submit` 转交原始请求、来源、权限边界和真实验收要求；不追加技术方案或自拟验收目标。保留返回的 job ID。
+- 人明确要求创建独立工作时，用 `submit` 转交原始请求、来源、权限边界和真实验收要求；不追加技术方案或自拟验收目标。返回对象的 `id` 是 job ID；不要读取不存在的 `job_id` 后重复提交。`wait-start` 回执才使用 `job_id` 字段。
 - 默认只做一次有界启动确认：`wait-start <job ID>` 取得 work ID、真实 threadId/turnId、cwd 与运行观察后立即返回。它不等待执行或验收结束。超时仍未启动时如实报告“已入队”或“启动结果不明”，保存已有标识后返回，不能重复 submit 或无限刷新。
 - 普通聊天默认直接在当前 chat 回答。人指定要和后台主 thread 对话时，使用 `chat`；程序禁止这类输入创建 worker 或外发回复。
 - 同一工作的修正或用户回答用 `followup <工作 ID>`，继续原 thread；确认本次跟进已入队或启动后同样返回。“继续”“跟进”“修一下”不表示要入口 chat 等到完成。查看所管理工作用 `list` 取一次快照，详情用 `read <工作 ID>`，调度诊断用 `status`；不向 worker 反复发送“进展如何”。
@@ -39,7 +39,7 @@ description: "仅在当前 chat 已通过 setup-agent-manager 激活后，管理
 
 ## 收取结果与跟进
 
-默认不在入口 chat 使用 wait 循环、持续轮询、追踪日志直到退出，或等待 worker 验收。启动确认后简短交付真实 job/工作/会话标识和当前状态，明确后台会继续执行；“已启动”不能说成“已验收”。普通进展不刷屏，仅在有最终结果、影响交付的失败、需要用户决定的问题或用户主动查询时报告。
+默认不在入口 chat 使用 wait 循环、持续轮询、追踪日志直到退出，或等待 worker 验收。启动确认后简短交付真实 job/工作/会话标识和当前状态，明确后台会继续执行；“已启动”不能说成“已验收”。普通进展不刷屏；最终结果、影响交付的失败、待决定问题和主动查询需要报告，已配置巡检时合并本轮实际变化为简短摘要。
 
 只有用户明确要求“等到完成”“在这里等结果”等同步交付时，入口 chat 才持续有界等待和读取。wait 的 job 结束只表示该轮输入处理结束，不代表所有 worker 或验收完成；以原请求要求、worker 实际验收证据和最终结果为准。用户只要求派工或跟进时，不进入这种等待。
 
@@ -49,7 +49,9 @@ worker 的报告先交后台主 thread 核对；仍需补验或修正时继续�
 
 后台会话的原生名称统一为 `agent-manager · 主控 · <项目名>` 和 `agent-manager · <工作名称>`，便于在 Desktop 最近会话或历史中识别。名称只是展示，不激活会话；不更改用户入口 chat 的标题。项目分组和可见范围仍由 App 决定，见 [Desktop 名称与查找](references/runtime.md#desktop-名称与查找)。
 
-普通 progress 不反复唤醒后台主 thread。turn completed、worker ready 和已向人送达是不同事实。worker 按原验收要求完成检查；发现缺口由后台主 thread 将具体缺口交回同一 worker 修正，不让入口 chat 接手耗时验收，也不降低交付标准。
+普通 progress 不逐条通知用户。已激活 manager 的 worker 以 progress 结束轮次时，程序按原生报告引用去重唤醒后台主 thread，核对剩余事项并继续原 worker；这属于内部推进，不要求入口等待。有执行或排队跟进、待答请求、hold 或状态不明时不追加续跑。turn completed、worker ready 和已向人送达是不同事实，检查与修正仍按原验收要求。
+
+`$setup-agent-manager` 在宿主支持时为已激活入口登记一个每 10 分钟的 Codex heartbeat，并保存真实 automation ID。周期输入只运行一次 `patrol`，检查执行观察并补投遗漏的 progress 检查；普通 chat、未激活或已解绑入口无操作。重复设置复用已有定时任务，不能为每项工作再建计划。没有 App automation 工具时明确“周期巡检未配置”，不擅自装 cron。注册、回执、停用和运行条件见 [周期巡检](references/runtime.md#周期巡检与进展续跑)。
 
 `list` 只汇总当前 manager 数据目录登记的 Codex worker，包括尚未取得 threadId 的排队工作。执行观察、hold、报告状态和原生待答请求分别显示；不查询全局会话或 CMA，不等待、不恢复或派发任务。待答数只计仍有效且未回答的原生请求，业务问题详情继续 read。后台主 thread 通过 `sa_list_work` 查询；旧 thread 的兼容调用见 [运行说明](references/runtime.md#查看管理列表)。
 

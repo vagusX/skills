@@ -16,6 +16,7 @@ from .tools import MAIN_TOOLS, WORKER_TOOLS
 from .approvals import answer_receipt, live_request, validate_response
 from .notifications import deliver, notify
 from .listing import list_work
+from .patrol import progress_target, queue_progress_review, reconcile_progress
 
 
 REFERENCES = Path(__file__).resolve().parents[2] / "references"
@@ -141,8 +142,11 @@ class Controller:
         chat = self.store.one("SELECT * FROM chats WHERE id=?", (run["chat_id"],))
         job = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
         try:
-            client = await self.bind(chat)
             payload = await self.payload(job)
+            if payload.get("reason") == "progress_turn_ended" and not progress_target(self.store, payload):
+                self.store.finish(run["id"], "completed", "progress review superseded or blocked; no native input sent")
+                return
+            client = await self.bind(chat)
             text = INPUT_PREFIX + encode({"job_id": job["id"], "run_id": run["id"],
                 "kind": job["kind"], "chat_id": chat["id"], "cwd": chat["cwd"], "payload": payload})
             self.store.db.execute("UPDATE runs SET thread_id=?,server_pid=?,server_start=? WHERE id=?",
@@ -237,7 +241,7 @@ class Controller:
                     raise ValueError("repeated call identity with different arguments")
                 return decode(existing["result_ref"])
             if name == "sa_create_work":
-                if job["kind"] not in {"task", "recover"}:
+                if job["kind"] != "task" and not (job["kind"] == "recover" and payload.get("original_kind") == "task"):
                     raise ValueError("this event does not authorize a new work item")
                 operation_key = "create:" + payload.get("original_job_id", job["id"])
                 created = self.store.one("SELECT * FROM jobs WHERE request_key=?", (operation_key,))
@@ -293,6 +297,9 @@ class Controller:
                     raise ValueError("this source is not bound to the target work")
                 if work["hold"]:
                     raise ValueError("work is on hold; only a human continue command can release it")
+                if payload.get("reason") == "progress_turn_ended":
+                    if work["id"] != payload["work_id"] or not progress_target(self.store, payload):
+                        raise ValueError("progress review is stale, blocked or already continued; inspect current state")
                 followup, _ = self.store.enqueue("followup", work["id"], {"text": args["text"] if name == "sa_followup" else payload["text"]},
                     request_key="followup:" + request_key, parent_id=job["id"])
                 result = {"job_id": followup["id"], "queued": True}
@@ -337,6 +344,13 @@ class Controller:
                 "decision": response.get("decision"), "response_recorded": question["result_ref"] is not None})
         if chat["thread_id"]:
             result["turns"] = (await (await self.client("worker")).history(chat["thread_id"]))[-3:]
+        if chat["request_job_id"]:
+            original = self.store.one("SELECT * FROM jobs WHERE id=?", (chat["request_job_id"],))
+            try:
+                result["original_request"] = await self.payload(original) if original else None
+            except RuntimeError:
+                result["original_request"] = None
+                result["original_request_error"] = "original input is not recoverable; do not infer authorization"
         for name in args.get("paths", []):
             path = (Path(chat["cwd"]) / name).resolve(strict=True)
             if Path(chat["cwd"]) not in path.parents or not path.is_file():
@@ -409,13 +423,17 @@ class Controller:
                         {"text": "Worker turn ended without a valid report. Inspect native history; do not infer ready or repeatedly restart it.",
                          "work_id": chat["id"], "native_status": outcome},
                         request_key="missing-report:" + run["id"], parent_id=run["job_id"])
+                elif outcome == "completed":
+                    queue_progress_review(self.store, chat,
+                        {**run, "state": "exited", "outcome": outcome, "turn_id": turn["id"]})
             if chat["role"] == "main" and (job["kind"] == "wake" or
                     (job["kind"] == "recover" and payload.get("original_kind") == "wake")):
                 corrective = self.store.one("SELECT id FROM jobs WHERE parent_id=? AND kind IN ('task','followup','recover')",
                                             (job["id"],))
                 if not corrective:
                     kind = "result"
-                    if outcome != "completed" or payload.get("state") in {"failed", "dropped"}:
+                    if (outcome != "completed" or payload.get("state") in {"failed", "dropped"}
+                            or payload.get("reason") == "progress_turn_ended"):
                         kind = "failure"
                     elif payload.get("question"):
                         kind = "decision"
@@ -502,6 +520,7 @@ class Controller:
         if startup:
             self.store.db.execute("UPDATE jobs SET status='unknown' WHERE kind='outbox' AND status='inflight'")
             self.store.db.execute("UPDATE jobs SET status='done',error='native connection ended; request must be reissued' WHERE kind='question' AND status!='done'")
+            reconcile_progress(self.store)
 
     def poll_source(self, source_id):
         # Each thread has its own SQLite connection; network calls hold no write transaction.

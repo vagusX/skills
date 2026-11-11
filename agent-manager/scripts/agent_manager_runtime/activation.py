@@ -11,6 +11,7 @@ CONTROL_COMMANDS = frozenset({
     "start", "run", "stop", "panel", "panel-run", "panel-stop", "unbind-entry",
     "submit", "chat", "followup", "pause", "continue", "answer", "ack",
     "source-add", "source-disable", "poll", "ingest",
+    "heartbeat-plan", "heartbeat-bind",
 })
 
 

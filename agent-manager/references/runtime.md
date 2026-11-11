@@ -19,6 +19,14 @@ python3 "$cli" --project "$project" setup
 # entry_thread_id 来自当前入口 chat，不能使用后台主 threadId：
 python3 "$cli" --project "$project" bind-entry "$entry_thread_id"
 python3 "$cli" --project "$project" start
+python3 "$cli" --project "$project" context
+python3 "$cli" --project "$project" heartbeat-plan
+# active=true 后由设置 skill 注册或复用 App heartbeat，并保存实际回执。
+```
+
+设置不派发示例工作。用户另有明确任务时，才继续：
+
+```sh
 python3 "$cli" --project "$project" submit < "$request_file"
 # 从 submit 的真实返回中取得 job_id，只确认启动，不等执行或验收：
 python3 "$cli" --project "$project" wait-start "$job_id"
@@ -31,7 +39,7 @@ python3 "$cli" --project "$project" wait-start "$job_id"
 
 来自 Codex chat 的派工、控制、来源写入、答案和 ack 在读取正文、排队或启动子进程前核对激活入口。不匹配时拒绝，不自动绑定、重建或重发。显式的 context/list/status/read 等只读查询不激活会话。人工终端和后台内部操作保留原有能力；启动服务时只在子进程环境移除继承的 CODEX_THREAD_ID，不改父进程环境。该核对是工作流边界，不是 OS 隔离；agent 不能通过清空环境变量规避拒绝。
 
-用户明确退出当前 chat 管理模式时，用 unbind-entry 并回读 context，确认 active=false；原后台和已授权工作继续存在，旧通知也不代表重新激活。停止某项工作或整个后台仍需分别明确要求。已有绑定不因安装或升级被删除，也不迁走 threadId。
+用户明确退出当前 chat 管理模式时，设置 skill 先暂停并回读对应 heartbeat，再用 unbind-entry 并回读 context，确认 active=false。暂停失败或宿主无该工具时仍解绑，按返回的 heartbeat_to_pause 报告遗留计划；旧 tick 不再操作这个 manager。原后台和已授权工作继续存在，旧通知不代表重新激活。停止某项工作或整个后台仍需分别明确要求。已有绑定不因安装或升级被删除，也不迁走 threadId。
 
 三个 skill 的 Codex 元数据均设置 `policy.allow_implicit_invocation: false`，只允许显式调用；不能省略这项，否则默认恢复自动匹配。设置成功后入口读取 agent-manager 正文用于后续管理，仍按人的请求区分普通聊天与独立工作。[官方调用策略](https://learn.chatgpt.com/docs/build-skills#optional-metadata)
 
@@ -59,11 +67,41 @@ python3 "$cli" --project "$project" read "$work_id"
 
 wait 只等指定输入的原生轮次结束，不等所有后台工作或后续修正完成；以原始验收要求和 worker 证据判断。发现耗时补验或修正时仍交原 worker。普通查询、派发或“继续”不继承上一轮的同步等待方式。read 是只读原生历史查询，不恢复、不另开模型 turn。
 
-普通进展留在后台，不向用户逐次报告轮询或无变化的快照；仅最终结果、影响交付的失败、具体人类问题或用户主动查询需要回复。后台主 thread 可进行简短证据核对，但耗时执行、等待和验收由 worker 完成。
+普通进展留在后台，不向用户逐次报告轮询或无变化的快照。入口报告最终结果、影响交付的失败、具体人类问题和主动查询；已设置周期巡检时，将本轮实际变化合并成简短摘要。后台主 thread 可进行简短证据核对，但耗时执行、等待和验收由 worker 完成。
 
 `pause <工作 ID> [原停止要求]` 保存 hold 并请求原生中断；`continue <工作 ID> [跟进原文]` 由人明确解除；正文也可从 stdin 传入，保留本次继续的具体限制。status 中的 questions 是原生审批或提问，`answer <问题 ID>` 从 stdin 接收人选择对应的原生响应 JSON；旧连接已失效时不会套用旧回答。原生审批的 availableDecisions 和问题格式以实际请求为准。
 
 worker 的业务选择问题在其报告和后台主 thread 回复中，不应误当成原生 questions 列表。发现问题后转述真实问题并返回，不猜答案，也不在入口等人回答。人的业务回答经 `followup <原工作 ID>` 入队；原生审批用 answer。两者都复用既有状态，不创建替代 worker，不自动批准权限。
+
+## 周期巡检与进展续跑
+
+已激活 manager 中，worker 的普通 progress 报告仍留在后台；报告后原生 turn 已确认 completed，但工作未交付时，调度器将同一报告去重交给原后台主 thread。主 thread 核对原请求、报告和真实状态，将可推进的剩余工作继续交给同一 worker。它不只问进度，不重建 worker，也不把本轮结束当作交付。没有新报告依据时，不反复唤醒同一报告。
+
+有未结束或状态不明的 Run、已排队的跟进、未结束的原生问题、hold 或工作已关闭时，不据 progress 自动安排新一轮。原生审批仍须人明确回答；业务决定、真实外部等待和人的暂停要求继续有效。原始请求、权限与验收要求不因后台执行或巡检而改变。
+
+setup-agent-manager 只在确认当前真实入口激活后设置 App heartbeat。CLI 提供三个命令，均不替代 App 的计划管理工具：
+
+```sh
+python3 "$cli" --project "$project" heartbeat-plan
+# 通过宿主 automation_update 创建或复用 heartbeat，并 view 回读真实计划后：
+python3 "$cli" --project "$project" heartbeat-bind "$automation_id"
+# 每次周期唤醒仅调用一次；不等待后台执行或验收：
+python3 "$cli" --project "$project" patrol
+```
+
+heartbeat-plan 要求当前实际入口激活，返回 manager_id、entry_thread_id、name、prompt、interval_minutes=10、kind=heartbeat 和 saved 回执。先用 saved.automation_id view 回读；没有回执时，只读检查 `$CODEX_HOME/automations/*/automation.toml`，未设置 CODEX_HOME 则使用 `~/.codex/automations/`。按 name、kind 与 target_thread_id 核对既有计划，不能借用其他入口的计划。读取字段不依赖 Python 3.11 的 tomllib；不得为了读取配置安装依赖或执行其内容。
+
+通过宿主实际 automation_update 工具管理计划，参数以当前 schema 为准。已存在则复用，更新时保留无关字段；不存在才创建，正文使用 plan.prompt、目标使用实际 entry_thread_id，周期十分钟。view 回读 ID、kind、目标、周期、正文与 ACTIVE 状态后，heartbeat-bind 保存 automation_id、manager_id、entry_thread_id、name 小回执到 jobs，status.heartbeat 返回它。同 ID 可重复保存；不同 ID 会拒绝，须先核对，不以再建一个计划绕过。创建结果不明、已保存 ID 不存在或目标不符时，不盲目重试 create。
+
+patrol 读取宿主实际 CODEX_THREAD_ID。未激活、无当前 ID、后台 main/worker 或入口已解绑时无操作返回，不创建数据库、不自动 setup 或改绑。活跃入口中，它取一次工作快照，按原报告引用去重补排遗漏的 progress 检查；执行检查交给原后台主 thread，不在入口 followup 或创建 worker。scheduler_alive=false 时只报告进程未运行，不自动 start；用户明确 stop 不能被周期任务撤销。状态不明时保留 unknown，不重发。查询不回复审批，也不解除 hold。
+
+changed 表示真实执行观察、阻塞或报告发生变化，snapshot_at 等读取时间不作为变化。changed=false 时不重复汇报；有变化时简短说明事实和下一步。原生问题仍沿 inbox/ack/answer 流程处理，只询问未处理的有效请求，提问后返回。周期唤醒不要求入口持续轮询或等待，后台也不因入口结束而停止。
+
+heartbeat 是持续绑定 manager 的计划。当前没有未完成工作或本次验收已经结束时仍保留计划，空闲返回等待未来工作；不能自行暂停、删除或宣布整个巡检完成。只有人的明确停用巡检或退出管理模式请求才停止计划。
+
+无 automation 工具的 CLI 宿主可以使用事件续跑和显式 patrol，但不能声称已设置周期唤醒；不自动安装 cron、launchd，不直接写 automation.toml。heartbeat 回执不是频率配置，十分钟周期不新增环境变量或开关。App 内定时任务复用原 chat 上下文；本地项目执行依赖电脑开机、App 运行和目录可用，离线补跑不作保证。[官方定时任务说明](https://learn.chatgpt.com/docs/automations#schedule-a-task-inside-a-chat)
+
+升级文件不会热更新已经运行的 Python 后台。事件续跑逻辑与角色指令在新启动或正常重启后加载，继续原状态目录、main 和 worker threadId；不为启用巡检擅自停止工作或重建会话。当前 CLI patrol 可对旧记录补排检查，但不代表旧后台已加载新调度逻辑。App heartbeat 的实际状态须用 App 工具回读，SQLite 回执不能证明它仍启用。
 
 ## 查看管理列表
 
@@ -144,7 +182,7 @@ macOS 默认状态目录为 `~/Library/Application Support/agent-manager/<项目
 
 中断的原生轮次在确认旧进程结束并核对原生状态后，以恢复提示继续原授权工作；worker 先检查实际文件与外部状态。创建结果不明、输入无法核对或旧 thread 仍 active 时保留 unknown，不重建。旧版 JSON 管理记录不会自动导入或接管。
 
-“入口 chat 返回”与“后台 run 停止”不同：run 仍运行时收取报告，并通过原生队列通知绑定入口；run 停止时保留状态供下次 start 核对恢复。后台不安装定时任务或开机启动服务。
+“入口 chat 返回”与“后台 run 停止”不同：run 仍运行时收取报告，并通过原生队列通知绑定入口；run 停止时保留状态供下次 start 核对恢复。周期巡检由已激活入口的设置流程通过 App 工具管理，Python 后台不自行安装定时任务或开机启动服务。
 
 ## 入口通知与回执
 
@@ -208,5 +246,6 @@ python3 "$cli" --project "$project" source-add --command-json '["python3","/abso
 | --allow-reply | 可以且默认关闭；开启表示人明确允许向该 GitHub 来源回复 |
 | wait 的 --timeout | 可以，默认 60 秒；仅限制当前等待，不停止后台工作 |
 | wait-start 的 --timeout | 可以，默认 30 秒；只限制启动确认，0 为一次快照，不增加执行等待配置 |
+| heartbeat-bind 的 automation_id | 必须来自 App 工具创建或回读的真实计划；该命令只保存回执 |
 
 模型、profile、轮询周期和并发档位不新增用户配置。原生动态工具是实验接口；执行器沿用当前 Codex 登录与权限配置，不自动批准原生权限，也不修改全局配置来绕过缺失能力。
