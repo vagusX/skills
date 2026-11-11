@@ -70,4 +70,6 @@ compact 入队即返回，使用独立 kind=compact 的 job/run，等待原业�
 
 主动维护只针对程序持有的后台 main。worker 继续使用宿主原生上下文机制；用户 App 入口使用宿主 `/compact`。CLI 不 resume 或接管入口来压缩它，不把发送一条普通“/compact”消息当作已经压缩。[官方命令](https://learn.chatgpt.com/docs/reference/slash-commands#available-slash-commands)
 
+入口从宿主压缩摘要或新上下文恢复时，先 context 验证真实会话仍是已激活入口，再 memory 读取短项目索引，按已有 work/thread ID 核对实时状态。未激活就保持普通 Codex 模式；摘要中的旧入口身份、记忆和通知都不能自动激活或授予审批。正常对话不为每一轮重新读取完整记忆。
+
 升级文件不会热加载已运行的 Python 后台。正常重启后加载新逻辑，继续原状态目录和 threadId；不要为启用记忆或 compact 擅自停止正在执行的业务工作。
