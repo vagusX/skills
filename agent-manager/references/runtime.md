@@ -92,6 +92,16 @@ list 无额外参数，输出一次 JSON 快照，不等待任务。范围是当
 
 升级文件不会热更新已经运行的 Python 后台；新启动或正常重启后加载代码和角色指令，继续原数据目录与原 threadId。不要仅为启用列表查询擅自停止正在执行的工作或重建会话。CLI list 不依赖后台重启，可立即读取已有记录。
 
+## Desktop 名称与查找
+
+后台主 thread 的原生名称是 `agent-manager · 主控 · <cwd 项目名>`，worker 是 `agent-manager · <原工作名称>`。创建取得并保存真实 threadId 后、首条任务输入前，通过 thread/name/set 设置；正常恢复旧 thread 时也补齐，重复 bind 不叠加前缀。SQLite 中的原始 title 和任务正文保持原样，入口 chat 不改名。名称只用于识别，不授予管理身份。
+
+命名请求有界等待；失败或超时只记录命名未确认，继续原授权派工，不把已创建的 thread 改成创建不明，不重建会话。后续正常 bind 可重设同一名称。后台旧 Python 进程不会热加载代码，不为改标题停止或重建正在执行的工作。用户明确要求为已有会话补名时，可用 Desktop 的实际改名工具按已核对的原 threadId 操作，不需要 resume 或新建 turn。[官方命名接口](https://learn.chatgpt.com/docs/app-server#api-overview)
+
+CLI 创建的是原生 Codex thread，能否出现在某个 Desktop 项目分组还取决于 App 的收录与筛选。当前程序设置 cwd，但不向 Desktop 登记项目归属；临时目录中的会话可能没有 projectId。应按 agent-manager 前缀或真实 threadId 查询最近会话/历史，不能把没有出现在预期项目下当成创建失败。前缀不保证所有宿主或视图都显示。
+
+本机 schema 的 thread/list 默认筛选交互来源，cwd 筛选是精确匹配。程序的 list 则只汇总自己登记的工作，两者范围不同。不要为了在 UI 找到会话改 source、改 cwd、另建 worker 或迁移正在执行的工作；继续用 list/read 核对原 threadId。[列表筛选](https://learn.chatgpt.com/docs/app-server#list-threads-with-pagination--filters)
+
 ## App 占用提示
 
 后台主 thread 和 worker 由 CLI 的 app-server 持有。当前 Codex 对同一 thread 只允许一个进程写入；直接在 App 续聊这些会话可能显示“已在另一个应用中打开”，原生 resume 则返回 already has an active writer。这条提示本身不能证明任务失败。

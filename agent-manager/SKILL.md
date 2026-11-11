@@ -47,6 +47,8 @@ worker 的报告先交后台主 thread 核对；仍需补验或修正时继续�
 
 后台 threadId 用于定位工作，不能当作可直接在 App 续聊的入口。CLI 持有会话时，App 可能显示“已在另一个应用中打开”；继续在原入口 chat 查询、跟进和转交审批，分别使用 read、followup、answer。不要仅为消除该提示停止后台、改绑当前入口或创建聊天分叉。具体见 [App 占用提示](references/runtime.md#app-占用提示)。
 
+后台会话的原生名称统一为 `agent-manager · 主控 · <项目名>` 和 `agent-manager · <工作名称>`，便于在 Desktop 最近会话或历史中识别。名称只是展示，不激活会话；不更改用户入口 chat 的标题。项目分组和可见范围仍由 App 决定，见 [Desktop 名称与查找](references/runtime.md#desktop-名称与查找)。
+
 普通 progress 不反复唤醒后台主 thread。turn completed、worker ready 和已向人送达是不同事实。worker 按原验收要求完成检查；发现缺口由后台主 thread 将具体缺口交回同一 worker 修正，不让入口 chat 接手耗时验收，也不降低交付标准。
 
 `list` 只汇总当前 manager 数据目录登记的 Codex worker，包括尚未取得 threadId 的排队工作。执行观察、hold、报告状态和原生待答请求分别显示；不查询全局会话或 CMA，不等待、不恢复或派发任务。待答数只计仍有效且未回答的原生请求，业务问题详情继续 read。后台主 thread 通过 `sa_list_work` 查询；旧 thread 的兼容调用见 [运行说明](references/runtime.md#查看管理列表)。

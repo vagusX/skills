@@ -205,8 +205,10 @@ class ListingTests(unittest.TestCase):
             def __init__(client):
                 client.calls, client.responses = [], []
 
-            async def call(client, method, params):
+            async def call(client, method, params, **options):
                 client.calls.append((method, params))
+                if method == "thread/name/set":
+                    return {}
                 return {"thread": {"id": params.get("threadId", "fixture-created"), "cwd": params["cwd"]}}
 
             async def respond(client, request_id, result):
@@ -238,8 +240,10 @@ class ListingTests(unittest.TestCase):
         calls = []
 
         class Client:
-            async def call(client, method, params):
+            async def call(client, method, params, **options):
                 calls.append((method, params))
+                if method == "thread/name/set":
+                    return {}
                 return {"thread": {"id": "fixture-new-main", "cwd": params["cwd"]}}
 
         async def get_client(role):

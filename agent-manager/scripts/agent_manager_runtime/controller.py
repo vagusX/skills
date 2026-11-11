@@ -21,6 +21,13 @@ from .listing import list_work
 REFERENCES = Path(__file__).resolve().parents[2] / "references"
 # Persisted in native history; keep the format across the skill rename.
 INPUT_PREFIX = "SUPER_AGENT_INPUT\n"
+NAME_PREFIX = "agent-manager · "
+
+
+def managed_thread_name(chat):
+    label = ("主控 · " + (Path(chat["cwd"]).name or chat["cwd"]) if chat["role"] == "main"
+             else " ".join(chat["title"].split()) or chat["id"])
+    return label if label.startswith(NAME_PREFIX) else NAME_PREFIX + label
 
 
 class Controller:
@@ -29,6 +36,7 @@ class Controller:
         self.clients = {}
         self.loaded = set()
         self.applied_instructions = {}
+        self.applied_names = {}
         self.tasks = {}
         self.stop_event = None
         self.polling = set()
@@ -59,11 +67,24 @@ class Controller:
         # These are process/thread capabilities, not a complete native-tool guard.
         return ({"features.shell_tool": False, "agents.enabled": False} if role == "main" else {})
 
+    async def name_thread(self, client, chat):
+        name = managed_thread_name(chat)
+        if self.applied_names.get(chat["thread_id"]) == name:
+            return
+        try:
+            await client.call("thread/name/set", {"threadId": chat["thread_id"], "name": name}, timeout=5)
+        except (RuntimeError, OSError, asyncio.TimeoutError) as error:
+            # Optional metadata must not turn a linked thread into an unknown creation.
+            self.log("thread_name_unconfirmed", chat_id=chat["id"], thread_id=chat["thread_id"], error_type=type(error).__name__)
+            return
+        self.applied_names[chat["thread_id"]] = name
+
     async def bind(self, chat):
         client = await self.client(chat["role"])
         instructions = self.instructions(chat["role"])
         fingerprint = hashlib.sha256(encode({"text": instructions, "config": self.config(chat["role"])}).encode()).hexdigest()
         if chat["id"] in self.loaded and self.applied_instructions.get(chat["id"]) == fingerprint:
+            await self.name_thread(client, chat)
             return client
         params = {"cwd": chat["cwd"], "developerInstructions": instructions,
                   "config": self.config(chat["role"])}
@@ -90,6 +111,7 @@ class Controller:
                 raise RuntimeError("native cwd differs from the requested work directory")
             self.store.db.execute("UPDATE chats SET thread_id=?,binding='linked' WHERE id=?", (thread["id"], chat["id"]))
             chat["thread_id"] = thread["id"]
+        await self.name_thread(client, chat)
         self.loaded.add(chat["id"])
         self.applied_instructions[chat["id"]] = fingerprint
         self.log("thread_bound", chat_id=chat["id"], role=chat["role"], thread_id=chat["thread_id"])
