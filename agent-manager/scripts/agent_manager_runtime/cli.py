@@ -20,6 +20,8 @@ from .controller import Controller
 from .listing import list_work
 from .panel import ensure_panel, panel_record, panel_url, public_record, serve_panel, stop_panel
 from .patrol import bind_heartbeat, heartbeat_plan, heartbeat_receipt, patrol
+from .compaction import queue_compaction
+from .memory import Memory
 from .sources import commit_poll, fetch_source
 from .store import Store, data_directory, decode, encode, identifier
 
@@ -34,6 +36,16 @@ def parser():
     commands.add_parser("list", help="read one snapshot of this manager's registered Codex workers and pending native questions")
     commands.add_parser("patrol", help="check an active entry once and queue deduplicated progress reviews; never wait or approve")
     commands.add_parser("heartbeat-plan", help="describe the App heartbeat for this active entry and its saved receipt")
+    commands.add_parser("compact", help="queue native compaction of this manager's background main; never take the App entry")
+    cmd = commands.add_parser("memory", help="read a bounded project-first memory index, or one explicit scope")
+    cmd.add_argument("--scope", choices=("project", "global"))
+    for name in ("memory-put", "memory-forget"):
+        cmd = commands.add_parser(name)
+        cmd.add_argument("key")
+        cmd.add_argument("--scope", choices=("project", "global"), default="project")
+        if name == "memory-put":
+            cmd.add_argument("--source", required=True, help="real evidence or the human statement confirming the fact")
+            cmd.add_argument("text", nargs="?", help="omit to read verified memory text from stdin")
     cmd = commands.add_parser("heartbeat-bind", help="save a verified App automation ID for this active entry")
     cmd.add_argument("automation_id")
     cmd = commands.add_parser("bind-entry", help="bind the user-owned entry chat without resuming or taking its writer")
@@ -158,6 +170,19 @@ def dispatch(args, store):
         return heartbeat_plan(store) if command == "heartbeat-plan" else bind_heartbeat(store, args.automation_id)
     if command == "list":
         return list_work(store)
+    if command == "memory":
+        memory = Memory(store)
+        return memory.read(args.scope) if args.scope else memory.context()
+    if command in {"memory-put", "memory-forget", "compact"}:
+        if not store.main()["entry_thread_id"]:
+            raise ValueError("memory writes and compaction require an activated manager")
+        if command == "compact":
+            with store.transaction():
+                result = queue_compaction(store)
+            return {**result, "daemon": daemon_record(store)}
+        memory = Memory(store)
+        return (memory.put(args.key, stdin_or(args.text), args.source, args.scope)
+                if command == "memory-put" else memory.forget(args.key, args.scope))
     if command in {"bind-entry", "inbox"}:
         return asyncio.run(entry_command(store, args))
     if command == "unbind-entry":
@@ -318,7 +343,7 @@ def dispatch(args, store):
 def main(argv=None):
     args = parser().parse_args(argv)
     args.project = str(Path(args.project).expanduser().resolve(strict=True))
-    directory = Path(args.state_dir or data_directory(args.project))
+    directory = Path(args.state_dir or data_directory(args.project)).expanduser().resolve()
     store = None
     try:
         if args.command == "context":
@@ -326,6 +351,8 @@ def main(argv=None):
         elif args.command == "patrol" and not read_session_context(directory)["active"]:
             result = {"active": False, "skipped": True, "reason": "current chat is not the active entry"}
         else:
+            if args.command == "memory" and not (directory / "state.sqlite3").is_file():
+                raise ValueError("manager is not initialized; memory read did not create state")
             if args.command in CONTROL_COMMANDS:
                 require_active(read_session_context(directory), args.command)
             if args.command in {"heartbeat-plan", "heartbeat-bind"} and not read_session_context(directory)["active"]:

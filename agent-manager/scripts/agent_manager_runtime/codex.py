@@ -135,18 +135,21 @@ class Codex:
             finally:
                 self.events.task_done()
 
-    async def history(self, thread_id):
+    async def history(self, thread_id, limit=None):
         turns, cursor = [], None
         while True:
-            params = {"threadId": thread_id, "limit": 100, "itemsView": "full", "sortDirection": "asc"}
+            params = {"threadId": thread_id, "limit": min(limit, 100) if limit else 100,
+                      "itemsView": "full", "sortDirection": "desc" if limit else "asc"}
             if cursor:
                 params["cursor"] = cursor
             response = await self.call("thread/turns/list", params)
             turns.extend(response.get("data", []))
+            if limit and len(turns) >= limit:
+                return list(reversed(turns[:limit]))
             cursor = response.get("nextCursor")
             if not cursor:
                 break
-        return turns
+        return list(reversed(turns)) if limit else turns
 
     async def close(self):
         self.closed = True

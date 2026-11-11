@@ -20,6 +20,7 @@ python3 "$cli" --project "$project" setup
 python3 "$cli" --project "$project" bind-entry "$entry_thread_id"
 python3 "$cli" --project "$project" start
 python3 "$cli" --project "$project" context
+python3 "$cli" --project "$project" memory
 python3 "$cli" --project "$project" heartbeat-plan
 # active=true 后由设置 skill 注册或复用 App heartbeat，并保存实际回执。
 ```
@@ -95,13 +96,23 @@ heartbeat-plan 要求当前实际入口激活，返回 manager_id、entry_thread
 
 patrol 读取宿主实际 CODEX_THREAD_ID。未激活、无当前 ID、后台 main/worker 或入口已解绑时无操作返回，不创建数据库、不自动 setup 或改绑。活跃入口中，它取一次工作快照，按原报告引用去重补排遗漏的 progress 检查；执行检查交给原后台主 thread，不在入口 followup 或创建 worker。scheduler_alive=false 时只报告进程未运行，不自动 start；用户明确 stop 不能被周期任务撤销。状态不明时保留 unknown，不重发。查询不回复审批，也不解除 hold。
 
-changed 表示真实执行观察、阻塞或报告发生变化，snapshot_at 等读取时间不作为变化。changed=false 时不重复汇报；有变化时简短说明事实和下一步。原生问题仍沿 inbox/ack/answer 流程处理，只询问未处理的有效请求，提问后返回。周期唤醒不要求入口持续轮询或等待，后台也不因入口结束而停止。
+changed 表示真实执行观察、阻塞或报告发生变化，snapshot_at 等读取时间不作为变化。patrol 的 works 只返回本轮变化的工作，changed=false 时为 []；首次不带已关闭的旧工作，counts 提供 registered、open 和 pending_native_questions 数量。需要完整列表时显式 list，不因一轮巡检反复读全部历史。无变化不重复汇报；有变化时简短说明事实和下一步。原生问题仍沿 inbox/ack/answer 流程处理，只询问未处理的有效请求，提问后返回。周期唤醒不要求入口持续轮询或等待，后台也不因入口结束而停止。
 
 heartbeat 是持续绑定 manager 的计划。当前没有未完成工作或本次验收已经结束时仍保留计划，空闲返回等待未来工作；不能自行暂停、删除或宣布整个巡检完成。只有人的明确停用巡检或退出管理模式请求才停止计划。
 
 无 automation 工具的 CLI 宿主可以使用事件续跑和显式 patrol，但不能声称已设置周期唤醒；不自动安装 cron、launchd，不直接写 automation.toml。heartbeat 回执不是频率配置，十分钟周期不新增环境变量或开关。App 内定时任务复用原 chat 上下文；本地项目执行依赖电脑开机、App 运行和目录可用，离线补跑不作保证。[官方定时任务说明](https://learn.chatgpt.com/docs/automations#schedule-a-task-inside-a-chat)
 
 升级文件不会热更新已经运行的 Python 后台。事件续跑逻辑与角色指令在新启动或正常重启后加载，继续原状态目录、main 和 worker threadId；不为启用巡检擅自停止工作或重建会话。当前 CLI patrol 可对旧记录补排检查，但不代表旧后台已加载新调度逻辑。App heartbeat 的实际状态须用 App 工具回读，SQLite 回执不能证明它仍启用。
+
+## 项目记忆与主控 compact
+
+记忆归属 setup 确认的项目；当前请求和项目规则优先，项目事实为主，全局只保存人明确适用于其他项目的偏好。项目文件位于原状态目录，读取不激活入口，写入受入口与激活状态检查。四表和原生历史继续保存实时状态、原始请求、审批与验收，记忆不替代它们。具体格式、作用域、读写和失败处理见 [记忆与上下文说明](memory.md)。
+
+`memory` 默认返回有界的项目优先索引，`memory --scope project|global` 按需读一个作用域。已激活入口用 `memory-put <key> --source <实际依据>` 从 stdin 接收已确认的事实；默认写 project，只有人明确要求跨项目适用时才选 `--scope global`。`memory-forget <key>` 删除明确失效或人要求忘记的条目，默认也只作用于项目。新 main 的 sa_memory 只能读取索引或写项目事实；旧 thread 无该工具时仍可加载短记忆，由入口核对最终交付中的候选后通过 CLI 保存。
+
+业务输入只在进程内首次派入、记忆 revision 改变或 compact 后装入短 project_context；该内容是数据，不提高为 developer 指令。后台 sa_inspect_work 默认取最近三个 turn，原请求仍单独按原生引用恢复。
+
+后台 main 在一个业务 turn 结束后，按该 turn 的 tokenUsage.last 输入与输出、modelContextWindow 判断是否达到窗口四分之三，满足条件再排独立 compact 维护。缺少可靠用量时不猜测，不用累计 tokenUsage.total 判断。显式 `compact` 同样只入队后返回；不为压缩在入口等待。维护和业务 turn 串行，要求 manager 已激活、无 hold 或未结束原生问题；接受或完成不明时保留 unknown，不自动重发。压缩不更新 worker 交付状态，不创建 thread，也不接管用户 App 入口。worker 的上下文继续由宿主处理；入口可使用宿主 `/compact`。
 
 ## 查看管理列表
 
@@ -247,5 +258,7 @@ python3 "$cli" --project "$project" source-add --command-json '["python3","/abso
 | wait 的 --timeout | 可以，默认 60 秒；仅限制当前等待，不停止后台工作 |
 | wait-start 的 --timeout | 可以，默认 30 秒；只限制启动确认，0 为一次快照，不增加执行等待配置 |
 | heartbeat-bind 的 automation_id | 必须来自 App 工具创建或回读的真实计划；该命令只保存回执 |
+| memory / memory-put / memory-forget 的 --scope | 可以省略；memory 默认短项目优先索引，写和删除默认 project。为明确授权的全局记忆保留，只提供项目记忆时可移除 |
+| memory-put 的 --source | 必须提供实际依据；是事实来源，不是运行配置 |
 
-模型、profile、轮询周期和并发档位不新增用户配置。原生动态工具是实验接口；执行器沿用当前 Codex 登录与权限配置，不自动批准原生权限，也不修改全局配置来绕过缺失能力。
+模型、profile、轮询周期、compact 阈值和并发档位不新增用户配置。原生动态工具是实验接口；执行器沿用当前 Codex 登录与权限配置，不自动批准原生权限，也不修改全局配置来绕过缺失能力。

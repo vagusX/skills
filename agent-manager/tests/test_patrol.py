@@ -206,6 +206,25 @@ class PatrolTests(unittest.TestCase):
         self.assertFalse(json.loads(result.stdout)["active"])
         self.assertFalse(directory.exists())
 
+    def test_patrol_emits_only_changed_work_and_does_not_repeat_closed_history(self):
+        for index in range(40):
+            self.store.db.execute("INSERT INTO chats(id,role,title,cwd,closed,created_at) VALUES(?,'worker',?,?,1,0)",
+                ("old-" + str(index), "historical detail " * 20, str(self.project)))
+        first = patrol(self.store)
+        self.assertEqual([w["work_id"] for w in first["works"]], ["work"])
+        self.assertEqual(first["counts"]["registered"], 41)
+        quiet = patrol(self.store)
+        self.assertFalse(quiet["changed"])
+        self.assertEqual(quiet["works"], [])
+        self.assertLess(len(json.dumps(quiet)), 1500)
+        self.store.db.execute("UPDATE chats SET title='verified change' WHERE id='work'")
+        changed = patrol(self.store)
+        self.assertEqual([w["work_id"] for w in changed["works"]], ["work"])
+        self.store.db.execute("UPDATE chats SET closed=1 WHERE id='work'")
+        closed = patrol(self.store)
+        self.assertTrue(closed["works"][0]["closed"])
+        self.assertEqual(patrol(self.store)["works"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

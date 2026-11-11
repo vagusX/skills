@@ -133,11 +133,18 @@ def patrol(store):
     with store.transaction():
         previous = store.one("SELECT * FROM jobs WHERE request_key=?", (key,))
         changed = not previous or previous["request_hash"] != digest
-        receipt = {"observed_at": snapshot["snapshot_at"], "digest": digest}
+        old_works = decode(previous["result_ref"], {}).get("work_digests", {}) if previous else {}
+        work_digests = {w["work_id"]: hashlib.sha256(encode(w).encode()).hexdigest() for w in snapshot["works"]}
+        changes = [w for w in snapshot["works"] if old_works.get(w["work_id"]) != work_digests[w["work_id"]]
+                   and (not w["closed"] or w["work_id"] in old_works)]
+        receipt = {"observed_at": snapshot["snapshot_at"], "digest": digest, "work_digests": work_digests}
         if previous:
             store.db.execute("UPDATE jobs SET request_hash=?,result_ref=?,updated_at=? WHERE id=?",
                              (digest, encode(receipt), time.time(), previous["id"]))
         else:
             store.enqueue("effect", snapshot["manager_id"], None, request_key=key,
                           status="done", result=receipt, digest=digest)
-    return {"active": True, "changed": changed, "queued_review_job_ids": queued, **snapshot}
+    counts = {"registered": len(snapshot["works"]), "open": sum(not w["closed"] for w in snapshot["works"]),
+              "pending_native_questions": sum(w["pending_question_count"] for w in snapshot["works"])}
+    return {**snapshot, "active": True, "changed": changed, "queued_review_job_ids": queued,
+            "counts": counts, "works": changes if changed else []}

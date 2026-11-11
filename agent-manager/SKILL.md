@@ -5,7 +5,7 @@ description: "仅在当前 chat 已通过 setup-agent-manager 激活后，管理
 
 # Agent Manager
 
-本 skill 只定义已激活入口 chat 的管理操作，不是所有 Codex chat 的默认工作方式。CLI 和 SQLite 负责调度；受后台管理的 Codex 主 thread 负责路由和结果管理；worker 负责耗时执行、等待、验收及已有授权范围内的修正。入口 chat 默认确认派发后立即返回，用户可以继续聊天。
+本 skill 只定义已激活入口 chat 的管理操作，不是所有 Codex chat 的默认工作方式。manager 按 setup 确认的项目持续服务；CLI 和 SQLite 负责调度，后台 Codex 主 thread 负责路由和结果管理，worker 负责耗时执行、等待、验收及已有授权范围内的修正。入口 chat 默认确认派发后立即返回，用户可以继续聊天。
 
 ## 激活边界
 
@@ -64,6 +64,14 @@ worker 的报告先交后台主 thread 核对；仍需补验或修正时继续�
 暂停用 `pause <工作 ID>`，先保存 hold，再检查原生中断结果。只有人的明确继续要求才使用 `continue`；普通状态询问和 ready 不解除 hold。停止后台进程用 `stop`，其含义与暂停某项工作不同。
 
 issue 或第三方来源设置读 [来源接入](references/runtime.md#来源)。只在人的授权范围内监听和处理；外部回复必须显式允许，收到事件不等于获准发布、合并或更改管理规则。
+
+## 项目记忆与 compact
+
+需要恢复项目知识、保存长期事实或维护上下文时读 [记忆与上下文说明](references/memory.md)。当前请求和项目规则优先，记忆默认归属 setup 的项目；worker cwd 和入口 threadId 不改变该归属。全局只保存用户明确适用于其他项目的偏好，不自动合并模块、worktree 或旧 manager，也不把读取记忆当成入口激活。
+
+入口用 `memory` 读取短项目优先索引。用户确认长期决定、纠正旧认识或产物核对得到可复用结论后，才用 `memory-put` 保存事实与 source；默认 project，global 写入必须有人明确的跨项目要求。状态、审批和验收继续查四表与原生历史，秘密不写入记忆。记忆文件放用户数据目录；团队正式约定按正常文档改动更新，临时执行记录不提交业务仓库。
+
+巡检仅返回变化的 works，unchanged 时不反复读取整份列表。后台主控在业务 turn 结束后按可靠的上下文占用安排原生 compact；显式 `compact` 也只入队后返回。压缩使用独立维护记录，不计为交付、不重建 thread，不自动批准或解除 hold。用户 App 入口交宿主 `/compact` 处理，CLI 不接管入口，也不主动安排 worker 压缩。
 
 ## 能力边界
 

@@ -17,6 +17,8 @@ from .approvals import answer_receipt, live_request, validate_response
 from .notifications import deliver, notify
 from .listing import list_work
 from .patrol import progress_target, queue_progress_review, reconcile_progress
+from .compaction import context_needs_compaction, finish_compaction, queue_compaction
+from .memory import Memory
 
 
 REFERENCES = Path(__file__).resolve().parents[2] / "references"
@@ -45,6 +47,10 @@ class Controller:
         self.failed = None
         self.last_recovery = 0
         self.last_notifications = 0
+        self.memory_loaded = {}
+        self.context_epoch = {}
+        self.context_usage = {}
+        self.compaction_seen = set()
 
     def log(self, event, **values):
         print(encode({"at": time.time(), "event": event, **values}), flush=True)
@@ -142,18 +148,36 @@ class Controller:
         chat = self.store.one("SELECT * FROM chats WHERE id=?", (run["chat_id"],))
         job = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
         try:
+            if job["kind"] == "compact":
+                if (chat["role"] != "main" or not self.store.main()["entry_thread_id"] or chat["hold"]
+                        or self.store.one("SELECT id FROM jobs WHERE kind='question' AND status!='done'")
+                        or Memory(self.store).context().get("unavailable")):
+                    self.store.finish(run["id"], "skipped", "compaction requires an active idle main, readable memory and no pending questions")
+                    return
+                client = await self.bind(chat)
+                self.store.db.execute("UPDATE runs SET thread_id=?,server_pid=?,server_start=? WHERE id=?",
+                    (chat["thread_id"], client.process.pid, client.started, run["id"]))
+                await client.call("thread/compact/start", {"threadId": chat["thread_id"]})
+                return  # {} acknowledges the request; events confirm completion.
             payload = await self.payload(job)
             if payload.get("reason") == "progress_turn_ended" and not progress_target(self.store, payload):
                 self.store.finish(run["id"], "completed", "progress review superseded or blocked; no native input sent")
                 return
             client = await self.bind(chat)
-            text = INPUT_PREFIX + encode({"job_id": job["id"], "run_id": run["id"],
-                "kind": job["kind"], "chat_id": chat["id"], "cwd": chat["cwd"], "payload": payload})
+            envelope = {"job_id": job["id"], "run_id": run["id"],
+                "kind": job["kind"], "chat_id": chat["id"], "cwd": chat["cwd"], "payload": payload}
+            memory = Memory(self.store).context()
+            if self.memory_loaded.get(chat["id"]) != memory["revision"]:
+                envelope["project_context"] = memory
+            text = INPUT_PREFIX + encode(envelope)
             self.store.db.execute("UPDATE runs SET thread_id=?,server_pid=?,server_start=? WHERE id=?",
                 (chat["thread_id"], client.process.pid, client.started, run["id"]))
+            epoch = self.context_epoch.get(chat["id"], 0)
             result = await client.call("turn/start", {"threadId": chat["thread_id"],
                 "input": [{"type": "text", "text": text}]})
             turn_id = result["turn"]["id"]
+            if self.context_epoch.get(chat["id"], 0) == epoch:
+                self.memory_loaded[chat["id"]] = memory["revision"]
             with self.store.transaction():
                 self.store.db.execute("UPDATE runs SET turn_id=?,state='running' WHERE id=? AND state!='exited'",
                                       (turn_id, run["id"]))
@@ -211,6 +235,8 @@ class Controller:
         run = self.active_run(params["threadId"], params.get("turnId"))
         chat = self.store.one("SELECT * FROM chats WHERE id=?", (run["chat_id"],))
         job = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
+        if job["kind"] == "compact":
+            raise ValueError("compaction is maintenance and does not authorize business tool calls")
         name, args = params["tool"], params.get("arguments", {})
         if isinstance(args, str):
             args = json.loads(args)
@@ -224,6 +250,8 @@ class Controller:
             if args["work_id"] == self.store.main()["id"]:
                 return list_work(self.store)
             return await self.inspect(args)
+        if name == "sa_memory" and args.get("action") == "read":
+            return Memory(self.store).context()
         if job["kind"] == "chat":
             raise ValueError("ordinary conversation does not authorize background work or external writes")
         request_key = f"tool:{params['threadId']}:{params['callId']}"
@@ -240,7 +268,11 @@ class Controller:
                 if existing["request_hash"] != hash_value:
                     raise ValueError("repeated call identity with different arguments")
                 return decode(existing["result_ref"])
-            if name == "sa_create_work":
+            if name == "sa_memory":
+                if args.get("action") != "put" or args.get("scope", "project") != "project" or not self.store.main()["entry_thread_id"]:
+                    raise ValueError("project memory write requires an active manager and action=put")
+                result = Memory(self.store).put(args.get("key"), args.get("text"), args.get("source"))
+            elif name == "sa_create_work":
                 if job["kind"] != "task" and not (job["kind"] == "recover" and payload.get("original_kind") == "task"):
                     raise ValueError("this event does not authorize a new work item")
                 operation_key = "create:" + payload.get("original_job_id", job["id"])
@@ -343,7 +375,7 @@ class Controller:
             result["native_questions"].append({**answer_receipt(self.store, question["id"]),
                 "decision": response.get("decision"), "response_recorded": question["result_ref"] is not None})
         if chat["thread_id"]:
-            result["turns"] = (await (await self.client("worker")).history(chat["thread_id"]))[-3:]
+            result["turns"] = await (await self.client("worker")).history(chat["thread_id"], limit=3)
         if chat["request_job_id"]:
             original = self.store.one("SELECT * FROM jobs WHERE id=?", (chat["request_job_id"],))
             try:
@@ -369,12 +401,33 @@ class Controller:
 
     async def on_event(self, client, message):
         method, params = message["method"], message.get("params", {})
-        if method == "turn/started":
+        if method == "thread/tokenUsage/updated":
+            self.context_usage[params["threadId"]] = params
+            run = self.store.one("""SELECT r.* FROM runs r JOIN chats c ON c.id=r.chat_id
+                JOIN jobs j ON j.id=r.job_id WHERE c.role='main' AND c.thread_id=? AND r.turn_id=?
+                AND r.state='exited' AND r.outcome='completed' AND j.kind!='compact'""",
+                (params["threadId"], params["turnId"]))
+            if run and context_needs_compaction(params, run["turn_id"]):
+                with self.store.transaction():
+                    queue_compaction(self.store, after_run=run)
+        elif (method == "item/completed" and params.get("item", {}).get("type") == "contextCompaction") or method == "thread/compacted":
+            chat = self.store.one("SELECT id FROM chats WHERE thread_id=?", (params["threadId"],))
+            if chat:
+                self.memory_loaded.pop(chat["id"], None)
+                self.context_epoch[chat["id"]] = self.context_epoch.get(chat["id"], 0) + 1
+            run = self.store.one("""SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id
+                WHERE r.thread_id=? AND r.turn_id=? AND r.state!='exited' AND j.kind='compact'""",
+                (params["threadId"], params["turnId"]))
+            if run:
+                self.compaction_seen.add((params["threadId"], params["turnId"]))
+        elif method == "turn/started":
             try:
                 run = self.active_run(params["threadId"])
             except ValueError:
                 return
             self.store.db.execute("UPDATE runs SET turn_id=?,state='running' WHERE id=?", (params["turn"]["id"], run["id"]))
+            self.store.db.execute("UPDATE jobs SET native_ref=? WHERE id=?",
+                (encode({"thread_id": params["threadId"], "turn_id": params["turn"]["id"]}), run["job_id"]))
         elif method == "turn/completed":
             turn = params["turn"]
             run = self.store.one("SELECT * FROM runs WHERE turn_id=? AND state!='exited'", (turn["id"],))
@@ -409,6 +462,17 @@ class Controller:
             if not actual or actual["state"] == "exited":
                 return
             chat = self.store.one("SELECT * FROM chats WHERE id=?", (run["chat_id"],))
+            if job["kind"] == "compact":
+                seen = (chat["thread_id"], turn["id"]) in self.compaction_seen or any(
+                    i.get("type") == "contextCompaction" for i in turn.get("items", []))
+                finish_compaction(self.store, {**actual, "thread_id": chat["thread_id"]}, turn, seen)
+                self.compaction_seen.discard((chat["thread_id"], turn["id"]))
+                self.memory_loaded.pop(chat["id"], None)
+                self.context_usage.pop(chat["thread_id"], None)
+                if outcome != "completed" or not seen:
+                    notify(self.store, "compact-unconfirmed:" + run["id"], chat["id"], "failure",
+                           parent_id=job["id"], error="Native compaction did not complete with confirmed evidence; inspect status, do not replay it.")
+                return
             error = encode(turn["error"]) if turn.get("error") else None
             self.store.db.execute("UPDATE runs SET state='exited',outcome=?,ended_at=?,error=? WHERE id=?",
                 (outcome, time.time(), error, run["id"]))
@@ -440,6 +504,9 @@ class Controller:
                     notify(self.store, "main-result:" + run["id"], payload.get("work_id") or chat["id"],
                            kind, parent_id=job["id"], ref={"thread_id": chat["thread_id"], "turn_id": turn["id"]},
                            error=error, report_ref=payload.get("report_ref"))
+            if (chat["role"] == "main" and outcome == "completed" and
+                    context_needs_compaction(self.context_usage.get(chat["thread_id"]), turn["id"])):
+                queue_compaction(self.store, after_run=run)
         self.log("turn_completed", run_id=run["id"], chat_id=chat["id"], turn_id=turn["id"], outcome=outcome)
 
     async def recover(self, startup=False):
@@ -465,6 +532,13 @@ class Controller:
             client = await self.bind(chat)
             turns = await client.history(chat["thread_id"])
             turn = next((t for t in turns if t["id"] == run["turn_id"]), None)
+            original = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
+            if original["kind"] == "compact":
+                if turn and turn.get("status") in {"completed", "failed", "interrupted"}:
+                    await self.completed(run, turn)
+                else:
+                    self.store.db.execute("UPDATE runs SET state='unknown',error='native compaction acceptance or completion cannot be confirmed; not replaying' WHERE id=?", (run["id"],))
+                continue
             if turn is None:
                 matches = []
                 for candidate in turns:

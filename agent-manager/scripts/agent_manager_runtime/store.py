@@ -156,8 +156,8 @@ class Store:
             if self.one("SELECT id FROM runs WHERE chat_id=? AND state!='exited'", (chat_id,)):
                 return None
             job = self.one("""SELECT * FROM jobs WHERE chat_id=? AND status='pending'
-                AND kind IN ('task','chat','followup','wake','recover')
-                ORDER BY created_at,id LIMIT 1""", (chat_id,))
+                AND kind IN ('task','chat','followup','wake','recover','compact')
+                ORDER BY (kind='compact') DESC,created_at,id LIMIT 1""", (chat_id,))
             if not job:
                 return None
             # A shared checkout is a shared write resource, even with different threads.

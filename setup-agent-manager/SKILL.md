@@ -29,6 +29,8 @@ python3 "$cli" --project "$project" status
 
 bind-entry 不传 ID 时读取实际 CODEX_THREAD_ID。回读须确认 active=true、role=entry、entry_thread_id 等于当前会话，并核对独立的后台主 threadId、cwd 与进程。start 结果不明时保留现有状态，只读核对，不重复创建。重复设置当前入口复用原记录和后台。
 
+入口激活后运行 `memory`，读取这个 setup 项目的短记忆索引。按 [记忆与上下文说明](../agent-manager/references/memory.md) 将当前项目事实优先用于后续管理；读取失败或索引截断时保留标记，不冒充“没有记忆”。设置不写示例事实、不自动保存全局偏好、不为测试而调用 compact。项目记忆跟随原状态目录，不能因另一个 chat 或 worktree 名称相似而搬迁或合并。
+
 确认入口激活后，运行 `heartbeat-plan`，取得真实 manager_id、entry_thread_id、name、prompt、interval_minutes 和 saved。按 [周期巡检说明](../agent-manager/references/runtime.md#周期巡检与进展续跑) 注册这个 manager 的 App heartbeat：
 
 1. 查找宿主的 `automation_update` 工具。saved 有 automation_id 时先用 view 回读；没有时，只读检查 `$CODEX_HOME/automations/*/automation.toml`（未设置 CODEX_HOME 时用 `~/.codex/automations/`），按 plan.name、kind=heartbeat 与 target_thread_id 精确查找。不要把其他 manager 的计划当成自己的；不要只按显示名称判断。读取这些字段不需要安装依赖，也不要假定 Python 3.9 带有 tomllib。
@@ -41,7 +43,7 @@ bind-entry 不传 ID 时读取实际 CODEX_THREAD_ID。回读须确认 active=tr
 
 设置建立入口和周期巡检，不提交示例工作、不重派用户之前的任务、不创建 issue 来源、不更改全局 Codex 配置，也不自动批准原生权限。设置后的当前 chat 仍可普通聊天；只有明确的独立工作才派工。原请求中另有明确派工或来源设置时，在激活确认后按其授权继续。
 
-成功后读取 agent-manager/SKILL.md，供当前入口后续管理使用；简短报告真实项目、入口 ID、后台主 threadId、启动观察及周期巡检的实际回执或缺口。配置确认后返回，不等 worker 或验收完成。不要把入口身份传播给另一个 chat、fork 或 subagent。
+成功后读取 agent-manager/SKILL.md，供当前入口后续管理使用；简短报告真实项目、入口 ID、后台主 threadId、启动观察、记忆读取标记及周期巡检的实际回执或缺口。配置确认后返回，不等 worker、compact 或验收完成。不要把入口身份传播给另一个 chat、fork 或 subagent。
 
 用户明确要求退出当前 chat 的管理模式时，先回读对应 heartbeat，用实际 automation 工具暂停并 view 确认，再执行 unbind-entry，回读 context 确认 active=false。工具缺失或暂停失败时仍要解绑，并报告返回的 heartbeat_to_pause 中尚未确认停用的计划。旧 tick 会因入口核对失败而无操作返回，不能为此重新激活或改投其他 chat。解绑不会停止、取消或重建已授权后台工作；暂停某项工作或停止后台是另外的明确操作。已经排队的旧通知不代表重新激活。
 
