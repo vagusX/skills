@@ -22,6 +22,8 @@ from .panel import ensure_panel, panel_record, panel_url, public_record, serve_p
 from .patrol import bind_heartbeat, heartbeat_plan, heartbeat_receipt, patrol
 from .compaction import queue_compaction
 from .memory import Memory
+from .bindings import Bindings
+from .hooks import hook_plan, install_hook
 from .sources import commit_poll, fetch_source
 from .store import Store, data_directory, decode, encode, identifier
 
@@ -36,6 +38,8 @@ def parser():
     commands.add_parser("list", help="read one snapshot of this manager's registered Codex workers and pending native questions")
     commands.add_parser("patrol", help="check an active entry once and queue deduplicated progress reviews; never wait or approve")
     commands.add_parser("heartbeat-plan", help="describe the App heartbeat for this active entry and its saved receipt")
+    commands.add_parser("hook-plan", help="review the manager-only UserPromptSubmit hook without installing it")
+    commands.add_parser("hook-install", help="append the conditional prompt hook; native trust is reviewed separately")
     commands.add_parser("compact", help="queue native compaction of this manager's background main; never take the App entry")
     cmd = commands.add_parser("memory", help="read a bounded project-first memory index, or one explicit scope")
     cmd.add_argument("--scope", choices=("project", "global"))
@@ -145,11 +149,14 @@ async def entry_command(store, args):
         thread = (await client.call("thread/read", {"threadId": args.thread_id}))["thread"]
         if thread["id"] != args.thread_id:
             raise ValueError("native thread/read returned a different ID")
-        with store.transaction():
-            check_binding(store, args.thread_id)
-            result = bind_entry(store, args.thread_id)
-            for question in store.all("SELECT * FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NULL"):
-                notify(store, question["id"], question["chat_id"], "approval", parent_id=question["id"], question_id=question["id"])
+        if not isinstance(thread.get("cwd"), str) or not Path(thread["cwd"]).is_dir():
+            raise ValueError("native entry cwd is unavailable; do not guess its hook identity")
+        with Bindings().claim(store, args.thread_id, thread["cwd"]):
+            with store.transaction():
+                check_binding(store, args.thread_id)
+                result = bind_entry(store, args.thread_id)
+                for question in store.all("SELECT * FROM jobs WHERE kind='question' AND status='pending' AND result_ref IS NULL"):
+                    notify(store, question["id"], question["chat_id"], "approval", parent_id=question["id"], question_id=question["id"])
         return result
     finally:
         await client.close()
@@ -168,6 +175,13 @@ def dispatch(args, store):
         return patrol(store)
     if command in {"heartbeat-plan", "heartbeat-bind"}:
         return heartbeat_plan(store) if command == "heartbeat-plan" else bind_heartbeat(store, args.automation_id)
+    if command in {"hook-plan", "hook-install"}:
+        registry = Bindings()
+        main = store.main()
+        record = registry.read().get(main["cwd"])
+        if not record or record["state_directory"] != str(store.directory) or not registry.live(main["cwd"], record):
+            raise ValueError("enroll this actual entry with setup-agent-manager before configuring its prompt hook")
+        return hook_plan() if command == "hook-plan" else install_hook()
     if command == "list":
         return list_work(store)
     if command == "memory":
@@ -187,7 +201,9 @@ def dispatch(args, store):
         return asyncio.run(entry_command(store, args))
     if command == "unbind-entry":
         heartbeat = heartbeat_receipt(store)
-        store.db.execute("UPDATE chats SET entry_thread_id=NULL WHERE role='main'")
+        with Bindings().release(store):
+            with store.transaction():
+                store.db.execute("UPDATE chats SET entry_thread_id=NULL WHERE role='main'")
         return {"entry_thread_id": None, "already_queued_messages_unchanged": True,
                 "heartbeat_to_pause": heartbeat}
     if command == "ack":
@@ -346,6 +362,8 @@ def main(argv=None):
     directory = Path(args.state_dir or data_directory(args.project)).expanduser().resolve()
     store = None
     try:
+        if not args.state_dir:
+            directory = Bindings().state_directory(args.project) or directory
         if args.command == "context":
             result = read_session_context(directory)
         elif args.command == "patrol" and not read_session_context(directory)["active"]:

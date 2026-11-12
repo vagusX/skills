@@ -20,6 +20,7 @@ from agent_manager_runtime.activation import (
 from agent_manager_runtime.cli import dispatch, entry_command, parser
 from agent_manager_runtime.notifications import acknowledge, bind_entry, message, notify
 from agent_manager_runtime.store import Store, decode, encode
+from agent_manager_runtime.bindings import Bindings
 
 ENTRY = "01a1befa-15e7-7fa2-96de-7266ea1f6303"
 OTHER = "01a1befa-a180-7a92-b798-fa4ee66a562f"
@@ -36,6 +37,11 @@ class ActivationTests(unittest.TestCase):
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
         self.store = Store(Path(self.temp.name) / "state")
+        registry = Bindings(Path(self.temp.name) / "entries")
+        for target in ("agent_manager_runtime.cli.Bindings", "agent_manager_runtime.bindings.Bindings"):
+            index = patch(target, return_value=registry)
+            index.start()
+            self.addCleanup(index.stop)
         self.main = self.store.setup(self.project)
         self.store.db.execute("UPDATE chats SET thread_id=? WHERE id=?", (MAIN, self.main["id"]))
         self.store.db.execute("INSERT INTO chats(id,role,title,cwd,thread_id,created_at) VALUES('work','worker','existing',?,?,0)",
@@ -91,6 +97,7 @@ class ActivationTests(unittest.TestCase):
 
     def test_explicit_setup_binding_activates_only_current_chat_and_can_submit_original_input(self):
         calls = []
+        project = str(self.project.resolve())
 
         class NativeRead:
             def __init__(client, *args):
@@ -101,7 +108,7 @@ class ActivationTests(unittest.TestCase):
 
             async def call(client, method, params):
                 calls.append((method, params))
-                return {"thread": {"id": params["threadId"]}}
+                return {"thread": {"id": params["threadId"], "cwd": project}}
 
             async def close(client):
                 pass
@@ -164,8 +171,9 @@ class ActivationTests(unittest.TestCase):
             self.assertFalse(session_context(self.store)["active"])
             job = dispatch(Namespace(command="submit", text="explicit terminal input"), self.store)
             self.assertEqual(decode(job["payload"])["text"], "explicit terminal input")
-            # A deliberate terminal binding is retained; it does not claim that terminal is a chat.
-            check_binding(self.store, OTHER)
+            # Explicit terminals also unbind before replacing the current entry.
+            with self.assertRaisesRegex(ValueError, "another active entry"):
+                check_binding(self.store, OTHER)
 
     def test_context_real_cli_on_uninitialized_project_does_not_create_database(self):
         directory = Path(self.temp.name) / "uninitialized"

@@ -20,6 +20,9 @@ python3 "$cli" --project "$project" setup
 python3 "$cli" --project "$project" bind-entry "$entry_thread_id"
 python3 "$cli" --project "$project" start
 python3 "$cli" --project "$project" context
+python3 "$cli" --project "$project" hook-plan
+python3 "$cli" --project "$project" hook-install
+# 人通过原生 /hooks 或 Desktop Hooks 界面审阅信任；不代写信任记录。
 python3 "$cli" --project "$project" memory
 python3 "$cli" --project "$project" heartbeat-plan
 # active=true 后由设置 skill 注册或复用 App heartbeat，并保存实际回执。
@@ -34,7 +37,11 @@ python3 "$cli" --project "$project" wait-start "$job_id"
 # 保存回执后返回入口 chat。后台 run 保持运行。
 ```
 
-`setup` 只初始化项目，不激活会话或派工。`bind-entry` 是设置流程中的显式激活步骤；宿主提供当前 ID 时，目标必须相同，不允许照抄其他 ID 或覆盖不同的现有入口。原后台 main/worker 也不能绑定为入口。同入口重复设置复用记录。
+`setup` 只初始化项目，不激活会话或派工。`bind-entry` 是设置流程中的显式激活步骤；宿主提供当前 ID 时，目标必须相同，不允许照抄其他 ID 或覆盖不同的现有入口。原后台 main/worker 也不能绑定为入口。同入口重复设置复用记录。绑定核对原生 thread/read 的真实 cwd，并在用户数据目录的 entry-bindings.json 登记项目、入口 ID、实际入口 cwd 与原状态目录；项目 cwd 和入口 cwd 可以不同。注册文件不是第五张业务表，也不保存正文。
+
+项目 cwd 经 resolve 规范化，符号链接视为同一目录。跨 --state-dir 也只允许一个绑定；同一实际入口 cwd 不能另绑不同会话。注册文件加进程锁，绑定 SQLite 事务前保留登记；hook 同时读库核对，未提交的登记不激活。解绑清除 SQLite 入口及登记中的入口 ID，保留原状态目录指向；不显式传 --state-dir 的后续调用仍找回原库，不创建替代 manager。发生 binding_conflict 时拒绝管理操作，应先核对原入口，不能删除索引或另建状态目录绕过。
+
+未登记的旧版本库仍可按原 context 规则读取和使用；显式再次 setup 才登记并启用条件提醒。登记后索引约束生效，其他历史库不能冒充入口。原默认目录已有绑定时，拒绝换库抢占；不会自动扫描或合并任意位置的旧自定义库。
 
 `start` 以独立进程启动同一个 CLI 的 run 和本地面板，日志写入数据目录；重复 start 复用已确认的后台及面板进程。run 也可在终端前台执行。stop 请求后台与面板退出并回查；不把“已请求”冒充已停止。本版本不安装开机启动服务。
 
@@ -43,6 +50,18 @@ python3 "$cli" --project "$project" wait-start "$job_id"
 用户明确退出当前 chat 管理模式时，设置 skill 先暂停并回读对应 heartbeat，再用 unbind-entry 并回读 context，确认 active=false。暂停失败或宿主无该工具时仍解绑，按返回的 heartbeat_to_pause 报告遗留计划；旧 tick 不再操作这个 manager。原后台和已授权工作继续存在，旧通知不代表重新激活。停止某项工作或整个后台仍需分别明确要求。已有绑定不因安装或升级被删除，也不迁走 threadId。
 
 三个 skill 的 Codex 元数据均设置 `policy.allow_implicit_invocation: false`，只允许显式调用；不能省略这项，否则默认恢复自动匹配。设置成功后入口读取 agent-manager 正文用于后续管理，仍按人的请求区分普通聊天与独立工作。[官方调用策略](https://learn.chatgpt.com/docs/build-skills#optional-metadata)
+
+## 仅入口会话的 prompt hook
+
+`hook-plan` 返回安装路径、UserPromptSubmit 定义和绝对 Python/脚本命令，不写文件；`hook-install` 只对已登记的活跃入口开放，在 `$CODEX_HOME/hooks.json`（未设置则为 `~/.codex/hooks.json`）的同名事件末尾追加独立 group。保留其他事件、字段和现有 group 顺序，相同命令已存在时复用，不覆盖它的其他设置；异常配置或写入失败保留原文件。配置只使用已有的 CODEX_HOME，没有新增环境变量或开关。
+
+hook 脚本为 scripts/agent_manager_prompt.py。它只读输入与登记/SQLite：session_id、实际 cwd、入口登记和库中绑定须一致，turn_id 须存在；带 agent_id 或 agent_type 的输入一律忽略，包括值为空的情况。原生 subagent 的 session_id 可能是父会话 ID，因此不能只比较 ID。fork 和后台 main/worker 不继承绑定。没有匹配、已解绑、目录不可用或记录损坏时退出 0 且 stdout/stderr 为空，不初始化项目、不派工、不阻塞、不恢复服务。共享 hook 不设置 statusMessage，普通 chat 没有 manager 提示。
+
+匹配时仅通过 hookSpecificOutput.additionalContext 返回当前 turn 的短身份说明、项目/状态路径及 SKILL.md 路径，最多 2400 字符；不复制 prompt、报告、完整 skill 或记忆内容。入口首次加载或 compact 后再按路径读取必要内容，管理前仍重新 context 核对。提醒不授予权限，不批准请求、不解除 hold，也不改变默认派发后返回的行为。共享 handler 存在不代表其他 chat 进入管理模式；skill 仍关闭隐式调用，不在 AGENTS.md 写入全目录管理指令。
+
+原生 Codex 对新增或变更的 hook 要求人审阅信任。安装回执始终提示 requires_native_review，不检查或修改信任文件：CLI 使用 `/hooks`，Desktop 按当前版本 Review hooks / Hooks 设置审阅。未信任时 Codex 会跳过它。外部 app-server 的 hooks/list 只能核对该进程发现的定义，不能证明当前 Desktop chat 已加载；没有当前宿主证据时报告“当前 chat 注入未验证”，不强制重启、接管或分叉活动 chat。[官方输入与输出](https://learn.chatgpt.com/docs/hooks#userpromptsubmit)、[审阅与信任](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks)
+
+解绑后保留共享 handler 和项目到状态目录的指向，后续 prompt 无当前入口输出；其他已激活 manager 继续使用。历史提醒不会被删除，fork 也可能复制已有历史；这些旧文本不构成激活，新一轮按真实 ID 重新核对。示例：A 在项目 P setup 后可得到提醒；同 cwd 的 B、A 的 fork 和 A 派出的 worker 均无新注入。A 解绑后 A 也无输出；人再在 B 显式 setup，P 绑定 B，原 worker 保持原 ID 与权限。
 
 普通聊天使用 `chat`；它仍在同一个受管理的主 Codex thread 中保留上下文，但不能调用派工或外发工具。`submit` 用于人明确要求管理的独立工作；`followup <工作 ID>` 继续原 worker。不要仅为读进展调用 followup。
 

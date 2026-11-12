@@ -11,7 +11,9 @@ description: "仅在当前 chat 已通过 setup-agent-manager 激活后，管理
 
 只有人手动调用 `$setup-agent-manager`，或明确要求在当前 chat 启用 agent-manager 时，才进入设置流程；不能为处理普通任务自动调用设置 skill。维护本 skill、讨论实现、读取本文、普通“帮我实现/修复”、同 cwd 已有数据库、继承的历史或收到/粘贴通知，都不构成激活。未激活时按宿主正常 Codex 方式处理任务，不自行改为 submit、followup 或创建后台会话。
 
-设置由独立的 [setup-agent-manager](../setup-agent-manager/SKILL.md) 承担。已激活入口以当前项目状态目录的 `entry_thread_id` 为准，必须与宿主实际 `CODEX_THREAD_ID` 一致；用 `context` 取一次只读快照，只有 `active=true`、`role=entry` 才管理工作。另一个 chat、fork、subagent 或 worker 即使看到相同记录也不继承入口身份。找不到可靠当前 ID 时不能照抄父会话或通知中的 ID。
+设置由独立的 [setup-agent-manager](../setup-agent-manager/SKILL.md) 承担。已激活入口的 `entry_thread_id` 必须与宿主实际 `CODEX_THREAD_ID` 一致，并通过已登记项目与状态目录核对；用 `context` 取一次只读快照，只有 `active=true`、`role=entry` 才管理工作。同一 cwd 不允许通过不同状态目录绑定多个入口。另一个 chat、fork、subagent 或 worker 即使看到相同记录也不继承入口身份。找不到可靠当前 ID 时不能照抄父会话或通知中的 ID。
+
+setup 可安装 [条件 prompt hook](references/runtime.md#仅入口会话的-prompt-hook)，只给当前已绑定的入口注入短身份与 skill 路径，其他会话无输出。提醒只适用于所列当前 turn，不使 fork 激活，也不替代 context 检查；解绑后的旧提醒无效。完整 skill 和项目记忆按需读取，不在每轮重复注入。原生 hook 须人审阅信任，写入配置不代表当前 Desktop 已加载。
 
 当前 chat 未激活时，不自动 setup、bind-entry、start 或抢占别的入口；人明确要使用管理模式时，说明需手动调用 `$setup-agent-manager`。人明确查询既有管理状态可只读 list/status/read/context，不因此切换模式。worker 按自己的运行时角色执行、报告，不调用本 skill 或 CLI 再派同级长期工作。
 
