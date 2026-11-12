@@ -104,6 +104,12 @@ def command_poll(config, cursor):
 
 def fetch_source(store, source):
     config, cursor = decode(source["config"]), decode(source["cursor"])
+    if source["kind"] == "github-pr":
+        from .pull_requests import active_manager, github_pr_poll
+        work = store.one("SELECT id FROM chats WHERE id=? AND role='worker' AND closed=0", (config["work_id"],))
+        if not active_manager(store) or not work:
+            return [], cursor
+        return github_pr_poll(config, cursor)
     if source["kind"] == "github":
         outbound = store.all("SELECT id,result_ref FROM jobs WHERE source_id=? AND kind='outbox'", (source["id"],))
         own = [decode(j["result_ref"], {}).get("remote_id") for j in outbound]
@@ -121,6 +127,23 @@ def commit_poll(store, source, events, cursor):
         if not current or not current["enabled"] or current["cursor"] != source["cursor"]:
             return 0
         main = store.main()
+        if source["kind"] == "github-pr":
+            from .pull_requests import active_manager, REASON
+            config = decode(source["config"])
+            if not active_manager(store):
+                return 0
+            work = store.one("SELECT id FROM chats WHERE id=? AND role='worker' AND closed=0", (config["work_id"],))
+            if not work:
+                store.db.execute("UPDATE sources SET enabled=0 WHERE id=?", (source["id"],))
+                return 0
+            for event in events:
+                _, inserted = store.enqueue("wake", main["id"],
+                    {**event, "reason": REASON, "work_id": work["id"]}, source_id=source["id"], source_key=event["key"])
+                count += int(inserted)
+            merged = (cursor or {}).get("pull", {}).get("merged", False)
+            store.db.execute("UPDATE sources SET cursor=?,last_poll=?,next_poll=?,error=NULL,enabled=? WHERE id=?",
+                (encode(cursor), time.time(), time.time() + 60, int(bool(work) and not merged), source["id"]))
+            return count
         for event in events:
             owner = store.one("SELECT * FROM chats WHERE source_id=? AND source_key=? AND closed=0",
                               (source["id"], event["object_key"]))

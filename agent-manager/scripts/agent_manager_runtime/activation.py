@@ -14,6 +14,7 @@ CONTROL_COMMANDS = frozenset({
     "heartbeat-plan", "heartbeat-bind",
     "memory-put", "memory-forget", "compact",
     "hook-plan", "hook-install",
+    "watch-pr",
 })
 
 

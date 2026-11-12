@@ -155,9 +155,19 @@ class Store:
                 return None
             if self.one("SELECT id FROM runs WHERE chat_id=? AND state!='exited'", (chat_id,)):
                 return None
-            job = self.one("""SELECT * FROM jobs WHERE chat_id=? AND status='pending'
+            jobs = self.all("""SELECT * FROM jobs WHERE chat_id=? AND status='pending'
                 AND kind IN ('task','chat','followup','wake','recover','compact')
-                ORDER BY (kind='compact') DESC,created_at,id LIMIT 1""", (chat_id,))
+                ORDER BY (kind='compact') DESC,created_at,id""", (chat_id,))
+            job = None
+            for candidate in jobs:
+                from .pull_requests import review_gate
+                gate = review_gate(self, candidate)
+                if gate == "skipped":
+                    self.db.execute("UPDATE jobs SET status='done',result_ref=?,error=? WHERE id=?",
+                        (encode({"pr_review": {"outcome": "skipped"}}), "PR source disabled or original work closed", candidate["id"]))
+                elif gate != "deferred":
+                    job = candidate
+                    break
             if not job:
                 return None
             # A shared checkout is a shared write resource, even with different threads.

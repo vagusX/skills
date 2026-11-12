@@ -243,6 +243,40 @@ status.notifications 和 inbox 的回执分开记录：pending 尚未提交；qu
 
 只有最终结果、交付失败或待决定问题进入入口。worker ready 先交后台主 thread 核对；其已交回 worker 修正的轮次不发送为最终结果。原生审批直接通知入口，答案按原 RPC request ID、server PID/start、thread 和 turn 交回；发送前再次检查 hold 与连接。后台重启后旧请求失效，旧答案不用于新请求。命令或文件审批的 cancel 会中断 turn 并保存 hold，只有人的明确 continue 才恢复；管理线程通过 native_questions 核对已确认的选择，不因历史缺少执行条目而重申请求。
 
+## 交付 PR 的评论跟进
+
+已激活 manager 的 worker 在 sa_report.evidence 中单独列出本工作交付的完整 GitHub PR URL 时，程序登记一条 kind=github-pr 的 sources 记录，config.work_id 固定为原 worker。它不修改 chats.source_id/source_key，因此原 issue 来源继续归属原工作。只接受独立完整 URL，不从 summary 或任意文章中提取链接；参考 PR 不应列为本工作交付。sa_report.pull_requests 返回登记回执或失败原因。GitHub 身份与实际可读性在首次收取时核对，登记本身不证明远端收取成功。
+
+已有工作的 PR 可由已激活入口补登记：
+
+```sh
+python3 "$cli" --project "$project" watch-pr "$work_id" https://github.com/owner/repo/pull/123
+python3 "$cli" --project "$project" poll "$source_id"
+python3 "$cli" --project "$project" status
+```
+
+work_id 和 URL 是关联标识，不是新增配置开关；不增加环境变量或频率档位。相同 PR/work 重复登记复用 source 和游标，不能换绑别的 worker。自动报告不会恢复被人停用的监听；人明确 watch-pr 可重新启用原记录。没有登记 PR 的旧工作不自动扫描历史，先核对真实交付再补登记。
+
+复用已有后台约每 60 秒的来源循环，不依赖入口 turn 持续运行，不另建 App heartbeat、cron 或轮询进程。每次读取 PR 元数据，以及以下三个全分页列表：
+
+| 输入 | GitHub REST endpoint |
+| --- | --- |
+| PR 对话评论 | repos/{repo}/issues/{number}/comments |
+| review 正文与状态 | repos/{repo}/pulls/{number}/reviews |
+| 行内评论与回复 | repos/{repo}/pulls/{number}/comments |
+
+对象类别、GitHub ID、内容 hash 与递增 revision 标识一次变更。编辑后改回旧正文仍产生新版本；仅行号或 head SHA 改变不算新评论。保留旧 commit、文件/行号、回复归属及评论 URL，交原 worker 对照当前代码判断。PENDING review 及其草稿行内评论不交付；不按作者账号或 bot 类型一概过滤。每批最多 20 项变更，未排队对象保留旧游标供下次读取。网络、分页或归属检查失败不推进游标；事件入队与游标更新在同一事务中。
+
+每批只向原后台主控入一个 wake，reason=pull_request_comments，绑定原 work_id；不能走“来源没有 owner 就建 task”的逻辑。主控先 sa_inspect_work 核对原请求与真实状态，再用 sa_followup 继续原 worker，完整原评论上下文同时传入。每批及其恢复使用稳定跟进键，已入队/已执行的跟进不重复创建。原生接受不明时仍保留 unknown，沿原 job/thread/turn 核对，不重发或换 worker。
+
+有 hold、待答原生请求、未结束或 unknown 的执行、排队跟进时，PR wake 保持待处理；不会抢占 worker、回答审批或解除暂停。其他人工输入不被这类待处理 wake 堵住。发送前及主控工具提交时再次检查；已激活入口解绑后不收取或自动推进新 PR 反馈，尚未发送的 PR 跟进保留到明确重新激活。已被原生接受的 worker 输入继续按原恢复规则核对和恢复，不因解绑或停用监听取消已有授权，hold 仍然有效。
+
+主控这类轮次使用原生 turn/start.outputSchema 返回 outcome/summary，outcome 只能为 continued、no_action、needs_user。continued 须有原 worker 跟进回执；no_action 保存核对依据后安静结束；needs_user 向原入口提出具体决定，失败或缺失回执同样通知。旧原生 main/worker 沿用既有动态工具，不为此重建 thread。sa_inspect_work.pull_requests 返回监听状态、最近成功收取、错误、待处理批数及最近回执；实时正文仍在 GitHub 与 Codex 原生历史中。
+
+PR 暂时 closed 时保持监听但不推进，reopen 后继续处理未交付变更；merged 后或原工作 closed 时停止该监听，不新建替代 worker。source-disable 停止后续收取及尚未发送的 PR 推进，不中断已执行工作。收取失败保留游标，连续相同失败只向已激活入口提示一次，成功收取后再次失败可重新提示。监听本身是只读来源，不授予回复、标记 resolved、发布或合并权限。REST 的评论列表也不能证明 review thread 已解决；需要核对 resolved 状态时另读 GitHub 实际 review thread 数据。
+
+升级不会热加载正在运行的 Python 后台。新启动或正常重启后加载此逻辑与角色说明，继续原状态目录及主控/worker ID；不为启用监听强制重启业务工作。[对话评论](https://docs.github.com/en/rest/issues/comments#list-issue-comments)、[reviews](https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request)、[行内评论](https://docs.github.com/en/rest/pulls/comments#list-review-comments-on-a-pull-request)
+
 ## 来源
 
 限定一个 GitHub issue：

@@ -67,6 +67,10 @@ worker 的报告先交后台主 thread 核对；仍需补验或修正时继续�
 
 issue 或第三方来源设置读 [来源接入](references/runtime.md#来源)。只在人的授权范围内监听和处理；外部回复必须显式允许，收到事件不等于获准发布、合并或更改管理规则。
 
+worker 交付 GitHub PR 后，报告 evidence 中独立的完整 PR URL 会登记为原 work 的反馈来源。后台已有收取循环监听对话评论、review 和行内评论及编辑，按版本去重交原主控核对，再继续同一 worker；不另派工作，也不另建定时任务。普通确认或无须修改的评论只记回执，确需用户决定或处理失败才通知入口。原始授权、暂停和验收要求继续有效，监听不自动授权外发回复、解决讨论或合并 PR。
+
+已有 PR 可由已激活入口用 `watch-pr <原 work ID> <完整 GitHub PR URL>` 补登记；先确认属于该工作的交付，不从任意正文中抓链接。`status.sources` 查看收取时间、错误和 enabled，后台主控通过 sa_inspect_work 的 pull_requests 查看待处理数量及最近处理回执。注册不等于远端验证；具体去重、停用和恢复见 [PR 反馈](references/runtime.md#交付-pr-的评论跟进)。
+
 ## 项目记忆与 compact
 
 需要恢复项目知识、保存长期事实或维护上下文时读 [记忆与上下文说明](references/memory.md)。当前请求和项目规则优先，记忆默认归属 setup 的项目；worker cwd 和入口 threadId 不改变该归属。全局只保存用户明确适用于其他项目的偏好，不自动合并模块、worktree 或旧 manager，也不把读取记忆当成入口激活。

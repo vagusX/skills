@@ -11,7 +11,7 @@ import time
 
 from .codex import Codex, process_alive, process_start
 from .store import Store, decode, encode, identifier
-from .sources import fetch_source, commit_poll, send_outbox
+from .sources import fetch_source, commit_poll, send_outbox, digest
 from .tools import MAIN_TOOLS, WORKER_TOOLS
 from .approvals import answer_receipt, live_request, validate_response
 from .notifications import deliver, notify
@@ -19,6 +19,8 @@ from .listing import list_work
 from .patrol import progress_target, queue_progress_review, reconcile_progress
 from .compaction import context_needs_compaction, finish_compaction, queue_compaction
 from .memory import Memory
+from .pull_requests import (REASON as PR_REASON, REVIEW_SCHEMA, active_manager, defer_review,
+                            pr_status, report_prs, review_gate, review_receipt)
 
 
 REFERENCES = Path(__file__).resolve().parents[2] / "references"
@@ -160,6 +162,10 @@ class Controller:
                 await client.call("thread/compact/start", {"threadId": chat["thread_id"]})
                 return  # {} acknowledges the request; events confirm completion.
             payload = await self.payload(job)
+            gate = review_gate(self.store, job)
+            if gate and gate != "ready":
+                defer_review(self.store, run, gate)
+                return
             if payload.get("reason") == "progress_turn_ended" and not progress_target(self.store, payload):
                 self.store.finish(run["id"], "completed", "progress review superseded or blocked; no native input sent")
                 return
@@ -173,8 +179,10 @@ class Controller:
             self.store.db.execute("UPDATE runs SET thread_id=?,server_pid=?,server_start=? WHERE id=?",
                 (chat["thread_id"], client.process.pid, client.started, run["id"]))
             epoch = self.context_epoch.get(chat["id"], 0)
-            result = await client.call("turn/start", {"threadId": chat["thread_id"],
-                "input": [{"type": "text", "text": text}]})
+            params = {"threadId": chat["thread_id"], "input": [{"type": "text", "text": text}]}
+            if gate and chat["role"] == "main":
+                params["outputSchema"] = REVIEW_SCHEMA
+            result = await client.call("turn/start", params)
             turn_id = result["turn"]["id"]
             if self.context_epoch.get(chat["id"], 0) == epoch:
                 self.memory_loaded[chat["id"]] = memory["revision"]
@@ -319,21 +327,34 @@ class Controller:
                          "question": args.get("question"), "report_ref": ref},
                         request_key="wake:" + request_key, parent_id=job["id"])
                 result = {"recorded": True, "state": state}
+                if name == "sa_report" and state != "dropped":
+                    result["pull_requests"] = report_prs(self.store, chat["id"], args["evidence"])
             elif name in {"sa_followup", "sa_attach_event"}:
                 work = self.worker(args["work_id"])
                 if work["closed"]:
                     raise ValueError("work has been returned or closed")
                 if name == "sa_attach_event" and job["kind"] not in {"task", "recover"}:
                     raise ValueError("only a current authorized task can be attached")
-                if job["source_id"] and (work["source_id"] != job["source_id"] or work["source_key"] != payload.get("object_key")):
+                pr_source = self.store.one("SELECT * FROM sources WHERE id=? AND kind='github-pr'", (job["source_id"],)) if job["source_id"] else None
+                if pr_source and (decode(pr_source["config"])["work_id"] != work["id"] or payload.get("reason") != PR_REASON):
+                    raise ValueError("PR feedback can continue only its explicitly bound original worker")
+                if job["source_id"] and not pr_source and (work["source_id"] != job["source_id"] or work["source_key"] != payload.get("object_key")):
                     raise ValueError("this source is not bound to the target work")
                 if work["hold"]:
                     raise ValueError("work is on hold; only a human continue command can release it")
                 if payload.get("reason") == "progress_turn_ended":
                     if work["id"] != payload["work_id"] or not progress_target(self.store, payload):
                         raise ValueError("progress review is stale, blocked or already continued; inspect current state")
-                followup, _ = self.store.enqueue("followup", work["id"], {"text": args["text"] if name == "sa_followup" else payload["text"]},
-                    request_key="followup:" + request_key, parent_id=job["id"])
+                followup_key = "pr-followup:" + payload.get("original_job_id", job["id"]) if pr_source else "followup:" + request_key
+                existing_followup = self.store.one("SELECT * FROM jobs WHERE request_key=?", (followup_key,))
+                if pr_source and not existing_followup and review_gate(self.store, job) != "ready":
+                    raise ValueError("PR feedback is inactive, held, blocked, superseded or already queued; preserve the original worker")
+                next_payload = {"text": args["text"] if name == "sa_followup" else payload["text"]}
+                if pr_source:
+                    next_payload.update(reason=PR_REASON, work_id=work["id"], context=payload.get("context"))
+                followup, _ = self.store.enqueue("followup", work["id"], next_payload,
+                    source_id=job["source_id"] if pr_source else None,
+                    request_key=followup_key, parent_id=job["id"])
                 result = {"job_id": followup["id"], "queued": True}
             elif name == "sa_set_hold":
                 work = self.worker(args["work_id"])
@@ -369,6 +390,7 @@ class Controller:
         chat = self.worker(args["work_id"])
         result = {"work_id": chat["id"], "thread_id": chat["thread_id"], "cwd": chat["cwd"],
                   "hold": decode(chat["hold"]), "report_state": chat["report_state"], "turns": [], "artifacts": {}}
+        result["pull_requests"] = pr_status(self.store, chat["id"])
         result["native_questions"] = []
         for question in self.store.all("SELECT * FROM jobs WHERE kind='question' AND chat_id=? ORDER BY created_at DESC LIMIT 20", (chat["id"],)):
             response = decode(question["result_ref"], {})
@@ -457,6 +479,16 @@ class Controller:
         outcome = turn.get("status", "unknown")
         job = self.store.one("SELECT * FROM jobs WHERE id=?", (run["job_id"],))
         payload = decode(job["payload"], {})
+        is_pr_review = (payload.get("reason") == PR_REASON and self.store.one(
+            "SELECT id FROM sources WHERE id=? AND kind='github-pr'", (job["source_id"],))
+            and run["chat_id"] == self.store.main()["id"])
+        if is_pr_review and outcome == "completed" and not any(i.get("type") == "agentMessage" for i in turn.get("items", [])):
+            try:
+                chat = self.store.main()
+                history = await (await self.client("main")).history(chat["thread_id"], limit=3)
+                turn = next((t for t in history if t["id"] == turn["id"]), turn)
+            except (RuntimeError, OSError, asyncio.TimeoutError):
+                pass  # The missing outcome becomes a failure receipt, never a silent acknowledgement.
         with self.store.transaction():
             actual = self.store.one("SELECT * FROM runs WHERE id=?", (run["id"],))
             if not actual or actual["state"] == "exited":
@@ -494,7 +526,13 @@ class Controller:
                     (job["kind"] == "recover" and payload.get("original_kind") == "wake")):
                 corrective = self.store.one("SELECT id FROM jobs WHERE parent_id=? AND kind IN ('task','followup','recover')",
                                             (job["id"],))
-                if not corrective:
+                receipt = review_receipt(self.store, job, payload, turn) if is_pr_review else None
+                if receipt:
+                    if receipt["outcome"] in {"needs_user", "failed"}:
+                        notify(self.store, "main-result:" + run["id"], payload["work_id"],
+                            "decision" if receipt["outcome"] == "needs_user" else "failure", parent_id=job["id"],
+                            ref={"thread_id": chat["thread_id"], "turn_id": turn["id"]}, error=receipt["summary"])
+                elif not corrective:
                     kind = "result"
                     if (outcome != "completed" or payload.get("state") in {"failed", "dropped"}
                             or payload.get("reason") == "progress_turn_ended"):
@@ -612,6 +650,13 @@ class Controller:
             self.log("source_polled", source_id=source_id, new_jobs=count)
         except Exception as error:
             self.store.db.execute("UPDATE sources SET error=?,next_poll=? WHERE id=?", (str(error), time.time() + 60, source_id))
+            source = self.store.one("SELECT * FROM sources WHERE id=? AND kind='github-pr'", (source_id,))
+            if source and source["enabled"] and active_manager(self.store):
+                config = decode(source["config"])
+                key = digest([source_id, source["last_poll"], str(error)])
+                with self.store.transaction():
+                    notify(self.store, "pr-source-error:" + key, config["work_id"], "failure", parent_id=None,
+                           error="Registered PR feedback could not be read; inspect status.sources and restore access. No cursor advanced or review sent.")
             self.log("source_error", source_id=source_id, error=str(error))
         finally:
             self.polling.discard(source_id)
@@ -711,6 +756,8 @@ class Controller:
                     await self.recover()
                     self.last_recovery = time.monotonic()
                 for source in self.store.all("SELECT * FROM sources WHERE enabled=1 AND kind!='push' AND next_poll<=?", (time.time(),)):
+                    if source["kind"] == "github-pr" and not active_manager(self.store):
+                        continue
                     if source["id"] not in self.polling:
                         self.polling.add(source["id"])
                         task = asyncio.create_task(self.source_task(source["id"]))

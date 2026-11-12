@@ -24,6 +24,7 @@ from .compaction import queue_compaction
 from .memory import Memory
 from .bindings import Bindings
 from .hooks import hook_plan, install_hook
+from .pull_requests import watch_pr
 from .sources import commit_poll, fetch_source
 from .store import Store, data_directory, decode, encode, identifier
 
@@ -40,6 +41,9 @@ def parser():
     commands.add_parser("heartbeat-plan", help="describe the App heartbeat for this active entry and its saved receipt")
     commands.add_parser("hook-plan", help="review the manager-only UserPromptSubmit hook without installing it")
     commands.add_parser("hook-install", help="append the conditional prompt hook; native trust is reviewed separately")
+    cmd = commands.add_parser("watch-pr", help="bind GitHub PR feedback to an existing worker; do not create work or authorize replies")
+    cmd.add_argument("work_id")
+    cmd.add_argument("url")
     commands.add_parser("compact", help="queue native compaction of this manager's background main; never take the App entry")
     cmd = commands.add_parser("memory", help="read a bounded project-first memory index, or one explicit scope")
     cmd.add_argument("--scope", choices=("project", "global"))
@@ -184,6 +188,9 @@ def dispatch(args, store):
         return hook_plan() if command == "hook-plan" else install_hook()
     if command == "list":
         return list_work(store)
+    if command == "watch-pr":
+        with store.transaction():
+            return watch_pr(store, args.work_id, args.url, explicit=True)
     if command == "memory":
         memory = Memory(store)
         return memory.read(args.scope) if args.scope else memory.context()
