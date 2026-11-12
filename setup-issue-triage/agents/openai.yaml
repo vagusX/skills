@@ -1,0 +1,6 @@
+interface:
+  display_name: "Setup Issue Triage"
+  short_description: "绑定 issue 来源并启动 agent-manager 的 Codex 后台调度"
+  default_prompt: "在已激活的当前入口 chat 使用 $setup-issue-triage 配置指定项目的 issue 来源，并验证一次触发。"
+policy:
+  allow_implicit_invocation: false

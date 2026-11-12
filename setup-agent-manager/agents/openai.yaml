@@ -1,0 +1,6 @@
+interface:
+  display_name: "Setup Agent Manager"
+  short_description: "手动初始化并激活当前 Codex 会话的后台工作管理入口"
+  default_prompt: "使用 $setup-agent-manager 为指定项目启用当前 chat 的管理模式；绑定本会话并确认后台启动，保留已有工作和权限边界。"
+policy:
+  allow_implicit_invocation: false

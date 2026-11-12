@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent Manager · 等待你的确认</title>
+  <link rel="stylesheet" href="/panel.css">
+  <script src="/panel.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><span class="brand">AGENT MANAGER</span><span id="connection">正在连接</span></header>
+    <h1>等待你的确认</h1>
+    <p class="intro">回答会交回原来的后台工作。关闭此页会保留等待，不会代你选择。</p>
+    <p id="project"></p>
+    <p id="notice" role="status"></p>
+    <section id="questions" aria-label="待处理问题"></section>
+    <div id="empty" hidden><h2>暂时没有待处理的问题</h2><p>后台会继续执行。新问题会留在这里，不会自动打开新窗口。</p></div>
+    <footer>仅在本机提供服务 · 不接管 Codex App 会话</footer>
+  </main>
+</body>
+</html>
