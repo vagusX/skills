@@ -7,9 +7,9 @@ description: 统一管理各 Agent 的临时目录：优先落盘到 `~/agent-sc
 
 把所有 Agent 主动创建的临时文件收口到统一目录，避免散落在 `/tmp`（`/private/tmp`）里越积越大且分不清是谁、何时、为何创建的。
 
-> **前置要求（必配）**：仅安装本 skill 不够（skill 按需加载，写临时文件时通常不会被触发）。必须在全局 `AGENTS.md`（以及独立的 `CLAUDE.md` 等常驻规则文件）中加一行：
+> **前置要求（必配）**：仅安装本 skill 不够（skill 按需加载，写临时文件时通常不会被触发）。在全局 `AGENTS.md`（以及独立的 `CLAUDE.md` 等常驻规则文件）中加一行触发规则即可，规范细节统一以本 skill 为准：
 > ```markdown
-> - 临时文件禁止散落写入 `/tmp`：优先写入 `~/agent-scratch/<agent>/<session-id>/`（沙箱无权写 `~` 时回退到 `/tmp/agent-scratch/<agent>/<session-id>/`），首次创建时写入 `readme.txt` 注明创建时间及简短用途（≤50字）；盘点或清理走 `agent-scratch` skill。
+> - 需要创建、使用或清理临时文件/目录时，先读取并遵循 `agent-scratch` skill（禁止直接散落写入 `/tmp`）。
 > ```
 
 ## 路径规范与沙箱回退

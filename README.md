@@ -8,8 +8,8 @@
 
 ### `agent-scratch` 必配说明
 
-因为 skill 是按需加载的，仅安装本 skill 不会阻止 Agent 随手往 `/tmp` 写文件。**须在全局 `AGENTS.md`（以及独立的 `CLAUDE.md` 等常驻规则文件）中加一行**：
+因为 skill 是按需加载的，仅安装本 skill 不会阻止 Agent 随手往 `/tmp` 写文件。**须在全局 `AGENTS.md`（以及独立的 `CLAUDE.md` 等常驻规则文件）中加一行触发规则**，其余细节统一由 `agent-scratch` skill 维护（单一真源）：
 
 ```markdown
-- 临时文件禁止散落写入 `/tmp`：优先写入 `~/agent-scratch/<agent>/<session-id>/`（沙箱无权写 `~` 时回退到 `/tmp/agent-scratch/<agent>/<session-id>/`），首次创建时写入 `readme.txt` 注明创建时间及简短用途（≤50字）；盘点或清理走 `agent-scratch` skill。
+- 需要创建、使用或清理临时文件/目录时，先读取并遵循 `agent-scratch` skill（禁止直接散落写入 `/tmp`）。
 ```
