@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Scratch"
+  short_description: "Unified agent scratch dir (~/agent-scratch with /tmp fallback) and cleanup"
+  default_prompt: "Use $agent-scratch to initialize a session scratch directory with readme.txt, or list and prune stale directories under ~/agent-scratch and /tmp/agent-scratch."
